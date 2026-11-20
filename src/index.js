@@ -323,6 +323,13 @@ function adminPageHtml() {
 <div class="container">
   <button class="refresh-btn" onclick="loadLogs()">刷新日志</button>
   <button class="refresh-btn" style="background:#6c757d;margin-right:8px;" onclick="logout()">退出</button>
+  <!-- 在 <div class="container"> 里面，刷新按钮下方 -->
+  <div style="margin-top: 20px; display: flex; align-items: center; gap: 10px;">
+  <label for="repoFilter" style="font-weight: 600; color: #24292e;">筛选仓库：</label>
+  <select id="repoFilter" onchange="renderTable()" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;">
+  <option value="">全部仓库</option>
+  </select>
+  </div>
   <h1>GitHub 备份管理</h1>
   <table id="logTable">
     <thead><tr>
@@ -346,48 +353,81 @@ async function deleteBackup(fileName, btn){
     else { alert('删除失败：' + (result.message || '未知错误')); btn.disabled = false; btn.textContent = '删除'; }
   } catch(e) { alert('删除失败：' + e.message); btn.disabled = false; btn.textContent = '删除'; }
 }
+let allLogs = []; // 存放从接口拉回来的原始数据
+
 async function loadLogs(){
   try {
     const res = await fetch('/api/logs');
     if (res.status === 401) { location.reload(); return; }
     const data = await res.json();
-    const tbody = document.querySelector('#logTable tbody');
-    tbody.innerHTML = '';
-    if (!data.logs || data.logs.length === 0) { tbody.innerHTML = '<tr><td colspan="8">暂无备份记录</td></tr>'; return; }
-    data.logs.forEach(log => {
-      const tr = document.createElement('tr');
-      const canOperate = log.status === 'success' && log.file_name;
-      const cells = [
-        new Date(log.created_at).toLocaleString('zh-CN'),
-        log.repo_name, log.branch,
-        log.file_name || '-',
-        formatSize(log.file_size),
-        log.status === 'success' ? '成功' : '失败',
-        log.error_msg || ''
-      ];
-      cells.forEach((v,i) => {
-        const td = document.createElement('td');
-        td.textContent = v;
-        if (i === 5) td.className = log.status === 'success' ? 'status-success' : 'status-failed';
-        tr.appendChild(td);
-      });
-      const tdAction = document.createElement('td');
-      if (canOperate) {
-        const a = document.createElement('a');
-        a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
-        a.className = 'btn btn-download'; a.textContent = '下载';
-        const b = document.createElement('button');
-        b.className = 'btn btn-delete'; b.textContent = '删除';
-        b.onclick = () => deleteBackup(log.file_name, b);
-        tdAction.appendChild(a); tdAction.appendChild(b);
-      } else { tdAction.textContent = '-'; }
-      tr.appendChild(tdAction);
-      tbody.appendChild(tr);
+    allLogs = data.logs || [];
+
+    // 1. 更新仓库下拉框选项
+    const select = document.getElementById('repoFilter');
+    const currentVal = select.value;
+    const repos = [...new Set(allLogs.map(l => l.repo_name))].sort();
+
+    select.innerHTML = '<option value="">全部仓库</option>';
+    repos.forEach(repo => {
+      const opt = document.createElement('option');
+      opt.value = repo;
+      opt.textContent = repo;
+      select.appendChild(opt);
     });
+    if (repos.includes(currentVal)) select.value = currentVal;
+
+    // 2. 渲染表格
+    renderTable();
   } catch(e) {
     console.error(e);
     document.querySelector('#logTable tbody').innerHTML = '<tr><td colspan="8">加载日志失败</td></tr>';
   }
+}
+
+function renderTable(){
+  const tbody = document.querySelector('#logTable tbody');
+  tbody.innerHTML = '';
+
+  const selectedRepo = document.getElementById('repoFilter').value;
+  const filteredLogs = selectedRepo
+  ? allLogs.filter(l => l.repo_name === selectedRepo)
+  : allLogs;
+
+  if (filteredLogs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8">暂无备份记录</td></tr>';
+    return;
+  }
+
+  filteredLogs.forEach(log => {
+    const tr = document.createElement('tr');
+    const canOperate = log.status === 'success' && log.file_name;
+    const cells = [
+      new Date(log.created_at).toLocaleString('zh-CN'),
+                       log.repo_name, log.branch,
+                       log.file_name || '-',
+                       formatSize(log.file_size),
+                         log.status === 'success' ? '成功' : '失败',
+                         log.error_msg || ''
+    ];
+    cells.forEach((v,i) => {
+      const td = document.createElement('td');
+      td.textContent = v;
+      if (i === 5) td.className = log.status === 'success' ? 'status-success' : 'status-failed';
+      tr.appendChild(td);
+    });
+    const tdAction = document.createElement('td');
+    if (canOperate) {
+      const a = document.createElement('a');
+      a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
+      a.className = 'btn btn-download'; a.textContent = '下载';
+      const b = document.createElement('button');
+      b.className = 'btn btn-delete'; b.textContent = '删除';
+      b.onclick = () => deleteBackup(log.file_name, b);
+      tdAction.appendChild(a); tdAction.appendChild(b);
+    } else { tdAction.textContent = '-'; }
+    tr.appendChild(tdAction);
+    tbody.appendChild(tr);
+  });
 }
 loadLogs();
 <\/script>

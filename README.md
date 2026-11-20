@@ -35,20 +35,26 @@ github-backup-worker/
 ```
 
 ## 前置条件
-
 - Cloudflare 账号（免费版即可）
 - Node.js 18+
 - GitHub Personal Access Token（fine-grained，仅需目标仓库 `Contents: Read`）
 
 ## 部署步骤
 
-### 1. 登录 Wrangler
+### 1. 克隆项目并安装依赖
+
+```bash
+# 克隆代码到本地
+git clone https://github.com/ycscg/github-backup-worker.git
+cd github-backup-worker
+
+### 2. 登录 Wrangler
 
 ```bash
 npx wrangler login
 ```
 
-### 2. 创建 R2 桶和 D1 数据库
+### 3. 创建 R2 桶和 D1 数据库
 
 ```bash
 npx wrangler r2 bucket create github-backup-bucket
@@ -58,7 +64,7 @@ npx wrangler d1 create github-backup-db
 `d1 create` 输出 `database_id`，填入 `wrangler.toml` 的 `database_id` 字段；
 R2 桶名填入 `bucket_name` 字段。
 
-### 3. 初始化 D1 表结构
+### 4. 初始化 D1 表结构
 
 ```bash
 npx wrangler d1 execute github-backup-db --remote --file=./init.sql
@@ -66,7 +72,7 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 
 `init.sql` 会创建 `backups` 表及三个索引。
 
-### 4. 设置 Secret
+### 5. 设置 Secret
 
 ```bash
 npx wrangler secret put GITHUB_TOKEN      # GitHub PAT
@@ -74,7 +80,7 @@ npx wrangler secret put WEBHOOK_SECRET    # 自行生成随机串，与 GitHub W
 npx wrangler secret put ADMIN_PASSWORD    # 管理面板密码
 ```
 
-### 5. 部署
+### 6. 部署
 
 ```bash
 npx wrangler deploy
@@ -84,7 +90,7 @@ npx wrangler deploy
 如需绑定自定义域名，在 Cloudflare 控制台为 Worker 绑定 Custom Domain，
 并修改 `wrangler.toml` 的 `routes` 为你的域名后重新 `deploy`。
 
-### 6. 配置 GitHub Webhook
+### 7. 配置 GitHub Webhook
 
 目标仓库 → Settings → Webhooks → Add webhook：
 

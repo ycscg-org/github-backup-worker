@@ -1,28 +1,26 @@
--- 创建仓库元数据表
-CREATE TABLE IF NOT EXISTS repositories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    branch TEXT DEFAULT 'main',
-    last_commit_sha TEXT,
-    last_synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    is_active INTEGER DEFAULT 1,
-    UNIQUE(owner, repo)
+-- GitHub Backup Worker 数据库结构
+-- 线上实际使用的表：backups
+-- 本文件用于从零初始化 D1（本地 dev 或全新环境）
+
+CREATE TABLE IF NOT EXISTS backups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_name TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  status TEXT NOT NULL,              -- 'success' | 'failed'
+  error_msg TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  file_size INTEGER DEFAULT 0
 );
 
--- 创建同步日志表
-CREATE TABLE IF NOT EXISTS sync_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    commit_sha TEXT,
-    status TEXT NOT NULL, -- 'success', 'failed', 'skipped'
-    message TEXT,
-    r2_key TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+-- 1) cleanupOldBackups：WHERE repo_name=? AND branch=? AND status=? ORDER BY created_at DESC
+CREATE INDEX IF NOT EXISTS idx_backups_repo_branch_status_created
+  ON backups(repo_name, branch, status, created_at DESC);
 
--- 创建索引以加速查询
-CREATE INDEX IF NOT EXISTS idx_repo_owner_repo ON repositories(owner, repo);
-CREATE INDEX IF NOT EXISTS idx_logs_created_at ON sync_logs(created_at);
+-- 2) 下载/删除归属校验：WHERE file_name=? AND status='success'
+CREATE INDEX IF NOT EXISTS idx_backups_file_name
+  ON backups(file_name);
 
+-- 3) /api/logs 列表：ORDER BY created_at DESC LIMIT 50
+CREATE INDEX IF NOT EXISTS idx_backups_created
+  ON backups(created_at DESC);

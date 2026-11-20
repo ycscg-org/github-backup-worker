@@ -2,7 +2,8 @@ name = "github-backup-worker"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# 自定义域名路由放在顶层，正确的配置方式
+# 自定义域名路由,替换为你在worker设置中绑定的域名
+# 如没你的worker没有绑定自定义域名，请用#注释掉以下三行内容。
 routes = [
   { pattern = "fkgit.ai99cn.com/*", zone_name = "ai99cn.com" }
 ]
@@ -18,11 +19,10 @@ database_id = "66666f4a-d0f9-486d-8541-137199dd8468" # 替换为你的 D1 Databa
 binding = "BUCKET"
 bucket_name = "github-backup-bucket" # 替换为你的 R2 Bucket Name
 
-# 定时任务：每6小时同步一次 (cron表达式)
-[triggers]
-crons = ["0 */6 * * *"]
-
-# 环境变量提示 (通过 wrangler secret put 设置，不要硬编码在这里)
+[vars]
+BACKUP_RETAIN_COUNT = "5"
+BACKUP_FAILED_RETAIN_COUNT = "5"
+# 其他敏感环境变量提示 (通过 wrangler secret put 设置，不要硬编码在这里)
 # GITHUB_TOKEN: 你的 GitHub Personal Access Token
 # WEBHOOK_SECRET: GitHub Webhook 的 Secret
 # ADMIN_PASSWORD: 管理面板登录密码

@@ -6,3 +6,9 @@ node_modules/
 Thumbs.db
 .vscode/
 .idea/
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+dist/
+

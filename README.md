@@ -47,6 +47,7 @@ github-backup-worker/
 # 克隆代码到本地
 git clone https://github.com/ycscg/github-backup-worker.git
 cd github-backup-worker
+```
 
 ### 2. 登录 Wrangler
 

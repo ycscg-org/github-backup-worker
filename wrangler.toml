@@ -1,0 +1,28 @@
+name = "github-backup-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# 自定义域名路由放在顶层，正确的配置方式
+routes = [
+  { pattern = "fkgit.ai99cn.com/*", zone_name = "ai99cn.com" }
+]
+
+# 绑定 D1 数据库
+[[d1_databases]]
+binding = "DB"
+database_name = "github-backup-db"
+database_id = "66666f4a-d0f9-486d-8541-137199dd8468" # 替换为你的 D1 Database ID
+
+# 绑定 R2 存储桶
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "github-backup-bucket" # 替换为你的 R2 Bucket Name
+
+# 定时任务：每6小时同步一次 (cron表达式)
+[triggers]
+crons = ["0 */6 * * *"]
+
+# 环境变量提示 (通过 wrangler secret put 设置，不要硬编码在这里)
+# GITHUB_TOKEN: 你的 GitHub Personal Access Token
+# WEBHOOK_SECRET: GitHub Webhook 的 Secret
+# ADMIN_PASSWORD: 管理面板登录密码

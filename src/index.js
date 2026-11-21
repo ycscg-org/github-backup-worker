@@ -185,6 +185,26 @@ async function handleSyncOrg(request, env, ctx) {
       return Response.json({ success: false, message: "请填写组织名称" }, { status: 400 });
     }
 
+    // --- 新增预检逻辑 开始 ---
+    // 尝试请求该组织的仓库列表，如果 404，说明组织不存在
+    const checkRes = await fetch(`https://api.github.com/orgs/${orgName}/repos?per_page=1`, {
+      headers: {
+        "Authorization": `token ${env.GITHUB_TOKEN}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "github-backup-worker-cloudflare"
+      }
+    });
+
+    if (checkRes.status === 404) {
+      return Response.json({ success: false, message: `组织 "${orgName}" 不存在，请检查拼写` }, { status: 404 });
+    }
+    if (!checkRes.ok && checkRes.status !== 403) {
+       // 403 可能是限流，其他错误则直接拦截
+       return Response.json({ success: false, message: `GitHub API 错误: ${checkRes.status}` }, { status: 500 });
+    }
+    // --- 新增预检逻辑 结束 ---
+
+    // 校验通过后，再放入后台执行
     ctx.waitUntil(performOrgSync(env, orgName, limit));
     return Response.json({ success: true, message: `已提交 ${orgName} 的全量备份任务（单次上限 ${limit} 个），请稍后在日志中查看` });
   } catch (e) {

@@ -344,7 +344,7 @@ function adminPageHtml() {
 function formatSize(bytes){ if(!bytes||bytes===0) return '未知'; const u=['B','KB','MB','GB']; const i=Math.floor(Math.log(bytes)/Math.log(1024)); return (bytes/Math.pow(1024,i)).toFixed(2)+' '+u[i]; }
 async function logout(){ await fetch('/logout',{method:'POST'}); location.reload(); }
 async function deleteBackup(fileName, btn){
-  if(!confirm('确定要删除备份「'+fileName+'」吗？\\n此操作不可恢复！')) return;
+  if(!confirm('确定要删除记录「'+fileName+'」吗？\\n此操作不可恢复！')) return;
   btn.disabled = true; btn.textContent = '删除中...';
   try {
     const res = await fetch('/api/backup/delete?file=' + encodeURIComponent(fileName), { method:'DELETE' });
@@ -416,15 +416,22 @@ function renderTable(){
       tr.appendChild(td);
     });
     const tdAction = document.createElement('td');
-    if (canOperate) {
-      const a = document.createElement('a');
-      a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
-      a.className = 'btn btn-download'; a.textContent = '下载';
+    if (log.file_name) {
+      // 成功的记录：显示“下载”和“删除”
+      if (log.status === 'success') {
+        const a = document.createElement('a');
+        a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
+        a.className = 'btn btn-download'; a.textContent = '下载';
+        tdAction.appendChild(a);
+      }
+      // 不管成功还是失败，只要有文件名，都显示“删除”按钮
       const b = document.createElement('button');
       b.className = 'btn btn-delete'; b.textContent = '删除';
       b.onclick = () => deleteBackup(log.file_name, b);
-      tdAction.appendChild(a); tdAction.appendChild(b);
-    } else { tdAction.textContent = '-'; }
+      tdAction.appendChild(b);
+    } else {
+      tdAction.textContent = '-';
+    }
     tr.appendChild(tdAction);
     tbody.appendChild(tr);
   });
@@ -496,13 +503,18 @@ async function handleDeleteBackup(request, env) {
   if (!isValidBackupFileName(fileName)) return Response.json({ success: false, message: "非法文件名" }, { status: 400 });
   if (!env.DB) return Response.json({ success: false, message: "D1 DB not configured" }, { status: 500 });
 
+  // DB 归属校验（允许删除 success 或 failed 的记录）
   const row = await env.DB.prepare(
-    "SELECT id FROM backups WHERE file_name = ? AND status = 'success' LIMIT 1"
+    "SELECT id, status FROM backups WHERE file_name = ? LIMIT 1"
   ).bind(fileName).first();
-  if (!row) return Response.json({ success: false, message: "备份记录不存在" }, { status: 404 });
+  if (!row) return Response.json({ success: false, message: "记录不存在" }, { status: 404 });
 
   try {
-    await env.BUCKET.delete(fileName);
+    // 如果是成功的记录，才去删 R2 文件；失败记录可能压根没传上去
+    if (row.status === 'success') {
+      await env.BUCKET.delete(fileName);
+    }
+    // 清理 DB 记录
     await env.DB.prepare("DELETE FROM backups WHERE file_name = ?").bind(fileName).run();
     return Response.json({ success: true, message: "删除成功" });
   } catch (e) {

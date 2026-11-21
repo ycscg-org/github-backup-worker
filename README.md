@@ -15,14 +15,16 @@
 - ✅ 流式上传 R2（`FixedLengthStream`，大仓库不 OOM）
 - ✅ 备份保留策略可配置（按仓库+分支统计，成功/失败分开清理）
 - ✅ 内置管理面板：日志列表、仓库筛选、下载、删除（Cookie 会话认证）
+- ✅ 支持手动指定单库备份，以及按组织全量智能增量备份
+- ✅ 全量备份时自动跳过无更新的仓库，并实时在页面弹窗提示结果
 - ✅ 失败记录也落库，且支持手动清理
-- ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / Worker 10 万请求/天）
+- ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 1000次写/天 / Worker 10 万请求/天）
 
 ## 项目结构
 
 ```text
 github-backup-worker/
-├── wrangler.toml      # Wrangler 配置（D1/R2 绑定、自定义域名路由）
+├── wrangler.toml      # Wrangler 配置（D1/R2/KV 绑定、自定义域名路由）
 ├── init.sql           # D1 初始化脚本（backups 表 + 索引）
 ├── src/
 │   └── index.js       # Worker 核心逻辑（路由、备份、管理面板、API）
@@ -53,18 +55,22 @@ cd github-backup-worker
 npx wrangler login
 ```
 
-### 3. 创建 R2 桶和 D1 数据库
+### 3. 创建 Cloudflare 资源
 
 ```bash
 npx wrangler r2 bucket create github-backup-bucket
 npx wrangler d1 create github-backup-db
+npx wrangler kv namespace create bakgit-status-kv
 ```
+
+- `d1 create` 会输出 `database_id`，填入 `wrangler.toml`。
+- `kv namespace create` 会输出 KV 的 `id`，填入 `wrangler.toml`（注：Wrangler 自动生成的 binding 是 `bakgit_status_kv`，但代码里使用的是 `KV`，请在配置时手动将 binding 改为 `KV`）。
 
 ### 4. 修改配置文件（⚠️ 最重要的一步）
 
-在终端中创建了 R2 桶和 D1 数据库后，你必须修改 `wrangler.toml` 文件，将资源绑定到你自己的 Cloudflare 账号下。如果不修改，后续部署一定会失败。
+在终端中创建了 R2 桶、D1 数据库和 KV 命名空间后，你必须修改 `wrangler.toml` 文件，将资源绑定到你自己的 Cloudflare 账号下。如果不修改，后续部署一定会失败。
 
-使用文本编辑器（或 VS Code）打开根目录下的 `wrangler.toml`，你需要修改以下三个地方：
+使用文本编辑器（或 VS Code）打开根目录下的 `wrangler.toml`，你需要修改以下四个地方：
 
 **① 修改 D1 数据库 ID**
 
@@ -103,8 +109,20 @@ routes = [
 
 👉 注意：
 
-- 这里“ai99cn.com”是作者自用域名，如果你在cloudfaler有自己的域名，请将其修改为你自己的「子域名」和「主域名」。
+- 这里“ai99cn.com”是作者自用域名，如果你在 Cloudflare 有自己的域名，请将其修改为你自己的「子域名」和「主域名」。
 - 如果你没有自己的域名，必须在 `routes = [`、`{ pattern...}`、`]` 这三行前面加上 `#` 号注释掉。否则部署时会报错"找不到该域名"。
+
+**④ 修改 KV 命名空间 ID**
+
+找到 `[[kv_namespaces]]` 这一段（如果没有则手动添加）：
+
+```toml
+[[kv_namespaces]]
+binding = "KV"
+id = "7109ce428e324caa821c8bd2722a236b" # 替换为你刚才创建的 KV ID
+```
+
+👉 注意：binding 必须写为 `"KV"`，不要修改，否则代码里 `env.KV` 会报错。
 
 ### 5. 初始化 D1 表结构
 

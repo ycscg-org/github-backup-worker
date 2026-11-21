@@ -19,6 +19,10 @@ database_id = "66666f4a-d0f9-486d-8541-137199dd8468" # 替换为你的 D1 Databa
 binding = "BUCKET"
 bucket_name = "github-backup-bucket" # 替换为你的 R2 Bucket Name
 
+[[kv_namespaces]]
+binding = "KV"
+id = "7109ce428e324caa821c8bd2722a236b"# 替换为你自己创建的 KV 命名空间 ID
+
 [vars]
 BACKUP_RETAIN_COUNT = "5"
 BACKUP_FAILED_RETAIN_COUNT = "5"

@@ -204,6 +204,7 @@ npx wrangler secret put ADMIN_PASSWORD    # 管理面板密码
 ```bash
 npx wrangler deploy
 ```
+（如果你之前执行过 npm install，也可以简写为 npm run deploy）
 
 部署后得到 `https://github-backup-worker.<你的子域>.workers.dev`。如需绑定自定义域名，在 Cloudflare 控制台为 Worker 绑定 Custom Domain，并修改 `wrangler.toml` 的 `routes` 为你的域名后重新 `deploy`。
 

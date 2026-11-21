@@ -69,6 +69,12 @@ var index_default = {
     if (pathname === "/api/backup/delete" && request.method === "DELETE") {
       return await handleDeleteBackup(request, env);
     }
+    if (pathname === "/api/backup/trigger" && request.method === "POST") {
+      return await handleTriggerBackup(request, env, ctx);
+    }
+    if (pathname === "/api/backup/sync-org" && request.method === "POST") {
+      return await handleSyncOrg(request, env, ctx);
+    }
     return new Response("Not Found", { status: 404 });
   }
 };
@@ -138,6 +144,107 @@ async function hmacSha256Hex(secret, data) {
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
   return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---------- 手动备份 ----------
+async function handleTriggerBackup(request, env, ctx) {
+  if (!isAuthed(request, env)) {
+    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  }
+  try {
+    const body = await parseJson(request);
+    const repoFullName = body.repo; // 格式如 "owner/repo"
+    const branch = body.branch || "main"; // 默认 main，也可传 master
+
+    if (!repoFullName || !repoFullName.includes("/")) {
+      return Response.json({ success: false, message: "仓库格式错误，请填写 owner/repo" }, { status: 400 });
+    }
+
+    const [owner, repoName] = repoFullName.split("/");
+    
+    // 丢给后台异步执行，立即返回
+    ctx.waitUntil(performBackup(env, owner, repoName, branch, ""));
+    
+    return Response.json({ success: true, message: "备份任务已提交后台执行" });
+  } catch (e) {
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
+
+// ---------- 组织全量备份 ----------
+async function handleSyncOrg(request, env, ctx) {
+  if (!isAuthed(request, env)) {
+    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  }
+  try {
+    const body = await parseJson(request);
+    const orgName = body.org;
+    const limit = parseInt(body.limit, 10) || 10; 
+
+    if (!orgName) {
+      return Response.json({ success: false, message: "请填写组织名称" }, { status: 400 });
+    }
+
+    ctx.waitUntil(performOrgSync(env, orgName, limit));
+    return Response.json({ success: true, message: `已提交 ${orgName} 的全量备份任务（单次上限 ${limit} 个），请稍后在日志中查看` });
+  } catch (e) {
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
+
+async function performOrgSync(env, orgName, limit) {
+  try {
+    const res = await fetch(`https://api.github.com/orgs/${orgName}/repos?per_page=100&sort=updated`, {
+      headers: {
+        "Authorization": `token ${env.GITHUB_TOKEN}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "github-backup-worker-cloudflare"
+      }
+    });
+
+    if (!res.ok) throw new Error(`获取组织仓库列表失败: ${res.status} ${res.statusText}`);
+    const repos = await res.json();
+    
+    let count = 0;
+    let skipped = 0;
+
+    for (const repo of repos) {
+      if (count >= limit) {
+        console.log(`已达到单次备份上限 ${limit} 个，停止执行`);
+        break; 
+      }
+
+      // 查询最后一次成功备份的时间
+      const existing = await env.DB.prepare(
+        "SELECT created_at FROM backups WHERE repo_name = ? AND status = 'success' ORDER BY created_at DESC LIMIT 1"
+      ).bind(repo.name).first();
+
+      let needsBackup = false;
+      if (!existing) {
+        needsBackup = true;
+      } else {
+        // 将两者都转成毫秒时间戳进行比对
+        const lastBackupTime = new Date(existing.created_at).getTime();
+        const repoPushedAt = new Date(repo.pushed_at).getTime();
+        
+        if (lastBackupTime < repoPushedAt) {
+          needsBackup = true; 
+        }
+      }
+
+      if (!needsBackup) {
+        skipped++;
+        continue; 
+      }
+
+      console.log(`[${count + 1}/${limit}] 触发备份: ${repo.full_name} (${repo.default_branch})`);
+      await performBackup(env, repo.owner.login, repo.name, repo.default_branch || "main", repo.clone_url);
+      count++;
+    }
+    console.log(`组织备份任务结束。本次新备份 ${count} 个仓库，跳过了 ${skipped} 个已备份仓库。`);
+  } catch (e) {
+    console.error("全量备份组织失败:", e);
+  }
 }
 
 // ---------- 备份执行 ----------
@@ -330,6 +437,26 @@ function adminPageHtml() {
   <option value="">全部仓库</option>
   </select>
   </div>
+  <!-- 手动触发区块 -->
+  <div style="margin-top: 16px; padding: 12px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+    <strong>手动备份单库：</strong>
+    <input id="manualRepo" type="text" placeholder="owner/repo (如 ycscg-org/github-backup-worker)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 300px;" />
+    <input id="manualBranch" type="text" placeholder="分支 (默认 main)" value="main" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 120px;" />
+    <button onclick="triggerManualBackup()" style="padding: 6px 16px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始备份</button>
+  </div>
+
+  <!-- 组织全量触发区块 -->
+  <div style="margin-top: 16px; padding: 12px; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+    <strong>全量备份组织：</strong>
+    <input id="syncOrgName" type="text" placeholder="组织名 (如 ycscg-org)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 180px;" />
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;">
+      单次最多备份：
+      <input id="syncLimit" type="number" value="10" min="1" max="100" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 60px;" />
+      个
+    </label>
+    <button onclick="syncOrganization()" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始全量备份</button>
+    <span style="font-size: 12px; color: #666; width: 100%;">提示：程序会自动跳过已成功备份的仓库。如果遇到超大仓库导致超时，可把数量改为 1 并单独尝试。</span>
+  </div>
   <h1>GitHub 备份管理</h1>
   <table id="logTable">
     <thead><tr>
@@ -381,6 +508,78 @@ async function loadLogs(){
   } catch(e) {
     console.error(e);
     document.querySelector('#logTable tbody').innerHTML = '<tr><td colspan="8">加载日志失败</td></tr>';
+  }
+}
+
+async function triggerManualBackup() {
+  const repo = document.getElementById('manualRepo').value.trim();
+  const branch = document.getElementById('manualBranch').value.trim() || 'main';
+  
+  if (!repo || !repo.includes('/')) {
+    alert('请输入正确的仓库格式，例如：ycscg-org/github-backup-worker');
+    return;
+  }
+
+  const btn = document.querySelector('button[onclick="triggerManualBackup()"]');
+  btn.disabled = true;
+  btn.textContent = '提交中...';
+
+  try {
+    const res = await fetch('/api/backup/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, branch })
+    });
+    const result = await res.json();
+    if (result.success) {
+      alert('任务已提交，稍等几秒后点击“刷新日志”查看结果');
+      document.getElementById('manualRepo').value = '';
+    } else {
+      alert('提交失败：' + result.message);
+    }
+  } catch (e) {
+    alert('请求失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开始备份';
+  }
+}
+
+async function syncOrganization() {
+  const org = document.getElementById('syncOrgName').value.trim();
+  const limit = document.getElementById('syncLimit').value || 10;
+  
+  if (!org) {
+    alert('请输入 GitHub 组织名称');
+    return;
+  }
+
+    if (!confirm('确定要触发组织 "' + org + '" 的全量备份吗？\\n将自动补齐未备份的仓库（本次最多处理 ' + limit + ' 个）。')) {
+    return;
+  }
+
+  const btn = document.querySelector('button[onclick="syncOrganization()"]');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '提交中...';
+
+  try {
+    const res = await fetch('/api/backup/sync-org', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org, limit: parseInt(limit, 10) })
+    });
+    const result = await res.json();
+    if (result.success) {
+      alert('任务已提交到后台，请稍后刷新日志查看备份进度。');
+    } else {
+      alert('提交失败：' + result.message);
+    }
+  } catch (e) {
+    alert('请求失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }
 

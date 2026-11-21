@@ -43,7 +43,7 @@ github-backup-worker/
 ### 1. 克隆项目到本地并安装依赖
 
 ```bash
-git clone https://github.com/ycscg/github-backup-worker.git
+git clone https://github.com/ycscg-org/github-backup-worker.git
 cd github-backup-worker
 ```
 
@@ -115,6 +115,56 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 `init.sql` 会创建 `backups` 表及三个索引。
 
 ### 6. 设置 Secret
+
+本项目需要三个 Secret：`GITHUB_TOKEN`、`WEBHOOK_SECRET`、`ADMIN_PASSWORD`。三个值都通过 `wrangler secret put` 逐条写入，执行后终端会提示 `Enter a secret value:`，粘贴内容后回车即可（输入过程不回显）。重复执行同名命令会直接覆盖旧值。
+
+#### 6.1 生成一个 GitHub PAT（fine-grained Token）
+
+`GITHUB_TOKEN` 用于让 Worker 拉取目标仓库的 tarball。按以下步骤在 GitHub 网页端创建一个最小权限的 Personal Access Token：
+
+1. 登录 GitHub，点击右上角头像 → **Settings**。
+2. 左侧栏拉到底部，点击 **Developer settings**。
+3. 选择 **Personal access tokens** → **Fine-grained tokens** → 点击 **Generate new token**。
+4. 填写 **Token name**（如 `github-backup-worker`）、**Expiration**（有效期，建议 90 天或自定义）。
+5. **Repository access** 选择 **Only select repositories**，勾选需要备份的仓库（或选 **All repositories**）。
+6. **Permissions** → 展开 **Repository permissions**，找到 **Contents**，设置为 **Read-only**（本项目只需要读权限）。
+7. 点击 **Generate token**，页面会显示一串以 `github_pat_` 开头的 Token，**只显示一次，请立即复制保存**。
+
+拿到 Token 后写入 Secret：
+
+```bash
+npx wrangler secret put GITHUB_TOKEN      # 粘贴上一步生成的 github_pat_xxx
+```
+
+#### 6.2 生成随机串作为 WEBHOOK_SECRET
+
+`WEBHOOK_SECRET` 用于校验 GitHub Webhook 的 HMAC-SHA256 签名，需要一串足够随机的字符串。用下面的命令生成（任选其一，在本地终端执行）：
+
+```bash
+# 方式一：openssl（macOS/Linux 自带）
+openssl rand -hex 32
+
+# 方式二：Node.js（已装 Node 时可用）
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+复制命令输出的随机串，写入 Secret：
+
+```bash
+npx wrangler secret put WEBHOOK_SECRET    # 粘贴上一步生成的随机串，务必与 GitHub Webhook 里的 Secret 保持一致
+```
+
+#### 6.3 设置管理面板密码 ADMIN_PASSWORD
+
+`ADMIN_PASSWORD` 是管理面板的登录密码，可自定义为任意你方便记忆又不易被猜到的字符串（建议包含大小写字母、数字，长度 12 位以上）。
+
+```bash
+npx wrangler secret put ADMIN_PASSWORD    # 自定义你的管理面板密码，自行记住用于登录
+```
+
+#### 6.4 一键写入（可选）
+
+三条命令也可以连续执行：
 
 ```bash
 npx wrangler secret put GITHUB_TOKEN      # GitHub PAT

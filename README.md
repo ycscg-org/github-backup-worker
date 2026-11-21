@@ -1,6 +1,6 @@
 # GitHub Backup Worker
 
-基于 Cloudflare Workers 的零服务器 GitHub 仓库备份方案。GitHub Webhook 触发后，Worker 拉取仓库 tarball 并存入 R2，元数据记录在 D1，内置管理面板可查看日志、下载历史备份、删除归档。
+基于 Cloudflare Workers 的零服务器 GitHub 仓库全自动备份方案。每次提交触发 GitHub Webhook 唤起 Cloudflare Worker 拉取仓库 tarball 并存入 R2，元数据记录在 D1，内置管理面板可查看日志、手动批量备份、下载历史备份、删除归档。
 
 ## 架构
 
@@ -8,6 +8,7 @@
 - **Cloudflare Worker**：接收 GitHub Webhook、拉取 tarball、写 R2/D1、托管管理页
 - **R2**：存储 `.tar.gz` 备份文件
 - **D1**：存储备份记录（`backups` 表：仓库、分支、文件名、大小、状态、时间）
+- **KV**：存储各仓库的最近备份状态，供全量备份时判断仓库是否有更新
 
 ## 功能
 
@@ -15,10 +16,10 @@
 - ✅ 流式上传 R2（`FixedLengthStream`，大仓库不 OOM）
 - ✅ 备份保留策略可配置（按仓库+分支统计，成功/失败分开清理）
 - ✅ 内置管理面板：日志列表、仓库筛选、下载、删除（Cookie 会话认证）
-- ✅ 支持手动指定单库备份，以及按组织全量智能增量备份
+- ✅ 支持手动指定单库备份，以及按组织全量智能备份
 - ✅ 全量备份时自动跳过无更新的仓库，并实时在页面弹窗提示结果
 - ✅ 失败记录也落库，且支持手动清理
-- ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 1000次写/天 / Worker 10 万请求/天）
+- ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 1000 次写/天 / Worker 10 万请求/天）
 
 ## 项目结构
 
@@ -38,16 +39,18 @@ github-backup-worker/
 
 - Cloudflare 账号（免费版即可）
 - Node.js 18+
-- GitHub Personal Access Token（fine-grained，仅需目标仓库 `Contents: Read`）
+- GitHub Personal Access Token（**classic** 类型，勾选 `repo` scope；若仅备份公开仓库，勾 `public_repo` 也可）
 
 ## 部署步骤
 
-### 1. 克隆项目到本地并安装依赖
+### 1. 克隆项目到本地
 
 ```bash
 git clone https://github.com/ycscg-org/github-backup-worker.git
 cd github-backup-worker
 ```
+
+项目使用 `npx wrangler` 直接运行，无需手动安装依赖（如仓库提供了 `package.json`，也可先执行 `npm install`）。
 
 ### 2. 登录 Wrangler
 
@@ -136,22 +139,28 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 
 本项目需要三个 Secret：`GITHUB_TOKEN`、`WEBHOOK_SECRET`、`ADMIN_PASSWORD`。三个值都通过 `wrangler secret put` 逐条写入，执行后终端会提示 `Enter a secret value:`，粘贴内容后回车即可（输入过程不回显）。重复执行同名命令会直接覆盖旧值。
 
-#### 6.1 生成一个 GitHub PAT（fine-grained Token）
+#### 6.1 生成一个 GitHub PAT（classic）
 
-`GITHUB_TOKEN` 用于让 Worker 拉取目标仓库的 tarball。按以下步骤在 GitHub 网页端创建一个最小权限的 Personal Access Token：
+`GITHUB_TOKEN` 是让 Worker 能够顺利拉取代码的关键凭证，主要有两个作用：
+1. **突破 API 限流**：未认证的请求每小时只能请求 60 次，认证后可达 5000 次/小时。如果不配 Token，进行“组织全量备份”时会极易触发限流导致大批量失败。
+2. **读取私有仓库**：虽然是备份公开仓库无需 Token 也能拉取，但如果你想备份**自己的私有仓库**，或者你作为协作者有权限访问的他人私有仓库，必须通过 Token 提供授权。
+
+GitHub 有两类 Token：Fine-grained 与 classic。本项目**不使用 Fine-grained Token**——它一次只能授权一个 resource owner（你本人或某一个组织）名下的仓库，跨组织或批量备份时需要逐个生成、容易漏掉仓库，批量下载容易出现遗漏；因此统一使用 **Personal access tokens (classic)**，一份 `repo` scope 即可覆盖账号下可访问的全部仓库。
+
+生成步骤：
 
 1. 登录 GitHub，点击右上角头像 → **Settings**。
 2. 左侧栏拉到底部，点击 **Developer settings**。
-3. 选择 **Personal access tokens** → **Fine-grained tokens** → 点击 **Generate new token**。
-4. 填写 **Token name**（如 `github-backup-worker`）、**Expiration**（有效期，建议 90 天或自定义）。
-5. **Repository access** 选择 **Only select repositories**，勾选需要备份的仓库（或选 **All repositories**）。
-6. **Permissions** → 展开 **Repository permissions**，找到 **Contents**，设置为 **Read-only**（本项目只需要读权限）。
-7. 点击 **Generate token**，页面会显示一串以 `github_pat_` 开头的 Token，**只显示一次，请立即复制保存**。
+3. 选择 **Personal access tokens** → **Tokens (classic)** → 点击 **Generate new token (classic)**。
+4. 填写 **Note**（备注，如 `github-backup-worker`），并设置 **Expiration**（建议 90 天；下拉里也能选 No expiration，但不推荐）。
+5. **Select scopes**：勾选 **repo**（本项目只需读取仓库内容，classic 没有更细的只读选项，勾 `repo` 即可；若仅备份公开仓库，勾 `public_repo` 也够用）。
+6. 点击底部的 **Generate token**，页面会显示一串以 `ghp_` 开头的 Token，**该 Token 只显示一次，请立即复制保存**。
+7. 如果该 Token 需要访问启用了 SAML SSO 的组织，生成后还要在 Token 列表里点击 **Configure SSO** → **Authorize** 完成授权，否则访问该组织的私有仓库会返回 404。
 
 拿到 Token 后写入 Secret：
 
 ```bash
-npx wrangler secret put GITHUB_TOKEN      # 粘贴上一步生成的 github_pat_xxx
+npx wrangler secret put GITHUB_TOKEN      # 粘贴上一步生成的 ghp_xxx
 ```
 
 #### 6.2 生成随机串作为 WEBHOOK_SECRET
@@ -182,7 +191,7 @@ npx wrangler secret put ADMIN_PASSWORD    # 自定义你的管理面板密码，
 
 #### 6.4 一键写入（可选）
 
-三条命令也可以连续执行：
+以下三条命令对应上面 6.1–6.3，也可以连续执行：
 
 ```bash
 npx wrangler secret put GITHUB_TOKEN      # GitHub PAT
@@ -230,6 +239,8 @@ npx wrangler deploy
 - 删除备份（同时删 R2 文件和 D1 记录，失败记录也支持手动清理）
 
 ## 环境变量
+
+Secret 通过 `wrangler secret put` 设置，Var 在 `wrangler.toml` 的 `[vars]` 中修改。
 
 | 名称 | 类型 | 说明 |
 |---|---|---|

@@ -1,24 +1,26 @@
 # GitHub Backup Worker
 
-基于 Cloudflare Workers 的零服务器 GitHub 仓库全自动备份方案。每次提交触发 GitHub Webhook 唤起 Cloudflare Worker 拉取仓库 tarball 并存入 R2，元数据记录在 D1，内置管理面板可查看日志、手动批量备份、下载历史备份、删除归档。
+一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，并带实时进度反馈和 R2 空间熔断保护。
 
 ## 架构
 
 - **GitHub Webhook**：仓库 push 时触发，HMAC-SHA256 签名校验
-- **Cloudflare Worker**：接收 GitHub Webhook、拉取 tarball、写 R2/D1、托管管理页
+- **Cloudflare Worker**：接收 Webhook、拉取 tarball、写 R2/D1、托管管理页
 - **R2**：存储 `.tar.gz` 备份文件
-- **D1**：存储备份记录（`backups` 表：仓库、分支、文件名、大小、状态、时间）
-- **KV**：存储各仓库的最近备份状态，供全量备份时判断仓库是否有更新
+- **D1**：`backups` 表存备份记录（仓库、分支、文件名、大小、状态、错误信息、时间），`settings` 表存面板设置（`r2_max_gb` 空间上限、`backup_paused` 熔断状态）
+- **KV**：暂存单库备份（`manual_backup_result`）与全量备份（`sync_result`）的进度和结果，供管理页轮询实时展示
 
 ## 功能
 
 - ✅ GitHub Webhook 触发自动备份（HMAC-SHA256 签名校验）
-- ✅ 流式上传 R2（`FixedLengthStream`，大仓库不 OOM）
-- ✅ 备份保留策略可配置（按仓库+分支统计，成功/失败分开清理）
-- ✅ 内置管理面板：日志列表、仓库筛选、下载、删除（Cookie 会话认证）
-- ✅ 支持手动指定单库备份，以及按组织全量智能备份
-- ✅ 全量备份时自动跳过无更新的仓库，并实时在页面弹窗提示结果
-- ✅ 失败记录也落库，且支持手动清理
+- ✅ 流式上传 R2（`FixedLengthStream`，大仓库不 OOM；GitHub 未返回 Content-Length 时自动回退为缓冲上传）
+- ✅ 内置管理面板：日志列表、按仓库筛选、下载、删除（Cookie 会话认证，有效期 24 小时）
+- ✅ 手动备份单库：提交前校验仓库是否存在，分支留空时自动识别仓库默认分支（main / master / develop 等）
+- ✅ 单库备份实时反馈：后台任务完成后页面立即弹窗提示成功（含分支、文件大小）或具体失败原因，无需退出重登
+- ✅ 全量备份组织：对比 `pushed_at` 自动跳过无更新的仓库，单次处理数量可调，完成后弹窗汇总成功 / 失败 / 跳过数量
+- ✅ R2 空间熔断保护：占用超过设定上限时先自动清理冗余旧备份（每个仓库仅保留最新一条），仍不足则暂停全部备份，页面顶部显示红色横幅，清理空间后可一键恢复
+- ✅ 备份保留策略：每个 (仓库, 分支) 保留最近 5 条成功备份
+- ✅ 失败记录同样落库，支持手动清理
 - ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 1000 次写/天 / Worker 10 万请求/天）
 
 ## 项目结构
@@ -26,7 +28,7 @@
 ```text
 github-backup-worker/
 ├── wrangler.toml      # Wrangler 配置（D1/R2/KV 绑定、自定义域名路由）
-├── init.sql           # D1 初始化脚本（backups 表 + 索引）
+├── init.sql           # D1 初始化脚本（backups 表、settings 表及索引）
 ├── src/
 │   └── index.js       # Worker 核心逻辑（路由、备份、管理面板、API）
 ├── .env.example       # 本地开发环境变量示例
@@ -133,7 +135,19 @@ id = "7109ce428e324caa821c8bd2722a236b" # 替换为你刚才创建的 KV ID
 npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 ```
 
-`init.sql` 会创建 `backups` 表及三个索引。
+`init.sql` 需要创建两张表：
+
+- `backups`：备份记录（`repo_name`、`branch`、`file_name`、`file_size`、`status`、`error_msg`、`created_at`）及其索引
+- `settings`：面板设置（`r2_max_gb`、`backup_paused`）
+
+⚠️ `settings` 表是备份功能正常运行的必要项——每次备份都会读取其中的 R2 空间上限。如果你手上的 `init.sql` 是早期版本、只创建了 `backups` 表，请补建：
+
+```sql
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+```
 
 ### 6. 设置 Secret
 
@@ -204,6 +218,7 @@ npx wrangler secret put ADMIN_PASSWORD    # 管理面板密码
 ```bash
 npx wrangler deploy
 ```
+
 （如果你之前执行过 npm install，也可以简写为 npm run deploy）
 
 部署后得到 `https://github-backup-worker.<你的子域>.workers.dev`。如需绑定自定义域名，在 Cloudflare 控制台为 Worker 绑定 Custom Domain，并修改 `wrangler.toml` 的 `routes` 为你的域名后重新 `deploy`。
@@ -233,12 +248,29 @@ npx wrangler deploy
 
 ## 使用
 
-访问 Worker 根路径，输入 `ADMIN_PASSWORD` 登录，进入管理面板：
+访问 Worker 根路径，输入 `ADMIN_PASSWORD` 登录进入管理面板。
 
-- 查看备份日志（支持按仓库名称下拉筛选，防止看错）
-- 下载备份文件到本地（`.tar.gz`）
-- 手动备份指定名称仓库、全量备份指定组织仓库（默认单次10个仓库）
-- 删除备份（同时删 R2 文件和 D1 记录，失败记录也支持手动清理）
+**日志列表**
+
+- 按仓库名称下拉筛选，避免看错
+- 成功记录可「下载」（`.tar.gz`）或「删除」；删除会同时清除 R2 文件与 D1 记录，失败记录也支持手动清理
+
+**手动备份单库**
+
+1. 填写 `owner/repo`，分支可留空；留空时自动识别该仓库的默认分支
+2. 点击「开始备份」后，会先校验仓库是否存在，拼写错误或分支不存在会立即弹窗提示
+3. 提交成功后按钮显示实际使用的分支，后台完成时弹窗提示结果并自动刷新下面的日志列表
+
+**全量备份组织**
+
+1. 填写组织名，设置「单次最多备份」数量（默认 10，范围 1–100）
+2. 系统自动跳过最近备份时间晚于仓库 `pushed_at` 的仓库，只补齐有更新的
+3. 完成后弹窗汇总本次成功、失败、跳过数量
+
+**系统设置**
+
+- 「R2 最大可用空间」：设定可用于备份的空间上限（GB）。若多个 Worker 共用同一个 R2 桶，请扣除其他项目占用的空间
+- 空间不足触发熔断时，页面顶部出现红色横幅，清理旧备份腾出空间后点击「恢复备份」即可解除
 
 ## 环境变量
 
@@ -249,8 +281,10 @@ Secret 通过 `wrangler secret put` 设置，Var 在 `wrangler.toml` 的 `[vars]
 | `GITHUB_TOKEN` | Secret | GitHub PAT，拉取 tarball 用 |
 | `WEBHOOK_SECRET` | Secret | Webhook HMAC 校验密钥 |
 | `ADMIN_PASSWORD` | Secret | 管理面板密码 |
-| `BACKUP_RETAIN_COUNT` | Var | 每个 (repo, branch) 保留成功备份数，默认 5 |
-| `BACKUP_FAILED_RETAIN_COUNT` | Var | 每个 (repo, branch) 保留失败记录数，默认 5 |
+| `BACKUP_RETAIN_COUNT` | Var | 每个 (仓库, 分支) 保留的成功备份数 |
+| `BACKUP_FAILED_RETAIN_COUNT` | Var | 每个 (仓库, 分支) 保留的失败记录数 |
+
+> 提示：当前版本的成功备份保留数量由 `src/index.js` 顶部的常量 `BACKUP_RETAIN_COUNT = 5` 决定，`wrangler.toml` 中的同名 Var 尚未被代码读取，失败记录也暂未参与自动清理。如需调整保留数量，请直接修改该常量。
 
 ## 本地开发
 
@@ -264,7 +298,7 @@ npx wrangler dev
 ## 已知限制
 
 - 只处理 `refs/heads/*` 的 push 事件，不处理 tag、分支删除
-- 无定时全量备份（仅 webhook 触发；如需定时，需自行实现 `scheduled` 处理器）
+- 无定时全量备份（仅 Webhook 触发；如需定时，需自行实现 `scheduled` 处理器）
 - Worker 单次请求有 CPU 时长上限，超大仓库可能超时
 - 备份是 GitHub 提供的 tarball 快照，非完整 Git 仓库（无 `.git` 历史）
 

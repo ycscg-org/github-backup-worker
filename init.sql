@@ -1,5 +1,5 @@
 -- GitHub Backup Worker 数据库结构
--- 线上实际使用的表：backups
+-- 包含表：backups（备份记录）、settings（系统配置）
 -- 本文件用于从零初始化 D1（本地 dev 或全新环境）
 
 CREATE TABLE IF NOT EXISTS backups (
@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS backups (
   error_msg TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   file_size INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
 );
 
 -- 1) cleanupOldBackups：WHERE repo_name=? AND branch=? AND status=? ORDER BY created_at DESC

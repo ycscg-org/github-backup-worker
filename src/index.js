@@ -72,11 +72,20 @@ var index_default = {
     if (pathname === "/api/backup/trigger" && request.method === "POST") {
       return await handleTriggerBackup(request, env, ctx);
     }
+    if (pathname === "/api/backup/trigger-status" && request.method === "GET") {
+      return await handleTriggerStatus(request, env);
+    }
     if (pathname === "/api/backup/sync-org" && request.method === "POST") {
       return await handleSyncOrg(request, env, ctx);
     }
     if (pathname === "/api/backup/sync-status" && request.method === "GET") {
       return await handleSyncStatus(request, env);
+    }
+    if (pathname === "/api/settings" && request.method === "GET") {
+      return await handleGetSettings(request, env);
+    }
+    if (pathname === "/api/settings" && request.method === "POST") {
+      return await handleSaveSettings(request, env);
     }
     return new Response("Not Found", { status: 404 });
   }
@@ -149,6 +158,18 @@ async function hmacSha256Hex(secret, data) {
   return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ---------- 单库备份状态查询 ----------
+async function handleTriggerStatus(request, env) {
+  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定" }, { status: 500 });
+  
+  const result = await env.KV.get('manual_backup_result');
+  if (!result) return Response.json({ status: 'pending' });
+  
+  await env.KV.delete('manual_backup_result');
+  return Response.json(JSON.parse(result));
+}
+
 // ---------- 手动备份 ----------
 async function handleTriggerBackup(request, env, ctx) {
   if (!isAuthed(request, env)) {
@@ -156,16 +177,73 @@ async function handleTriggerBackup(request, env, ctx) {
   }
   try {
     const body = await parseJson(request);
-    const repoFullName = body.repo;
-    const branch = body.branch || "main";
+    const repoFullName = (body.repo || "").trim();
+    const branch = (body.branch || "").trim();
 
     if (!repoFullName || !repoFullName.includes("/")) {
       return Response.json({ success: false, message: "仓库格式错误，请填写 owner/repo" }, { status: 400 });
     }
 
     const [owner, repoName] = repoFullName.split("/");
-    ctx.waitUntil(performBackup(env, owner, repoName, branch, ""));
-    return Response.json({ success: true, message: "备份任务已提交后台执行" });
+    if (!owner || !repoName) {
+      return Response.json({ success: false, message: "仓库格式错误，请填写 owner/repo" }, { status: 400 });
+    }
+
+    // 校验仓库存在并获取默认分支
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, {
+      headers: {
+        "Authorization": `token ${env.GITHUB_TOKEN}`,
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "github-backup-worker-cloudflare"
+      }
+    });
+
+    if (repoRes.status === 404) {
+      return Response.json({ success: false, message: `仓库 "${owner}/${repoName}" 不存在，请检查拼写` }, { status: 404 });
+    }
+    if (!repoRes.ok) {
+      return Response.json({ success: false, message: `GitHub API 错误: ${repoRes.status}` }, { status: 500 });
+    }
+
+    const repoInfo = await repoRes.json();
+    const actualBranch = branch || repoInfo.default_branch;
+
+    // 先写入pending状态
+    if (env.KV) {
+      await env.KV.delete('manual_backup_result');
+      await env.KV.put('manual_backup_result', JSON.stringify({ status: 'pending' }), { expirationTtl: 300 });
+    }
+
+    // 异步执行备份
+    ctx.waitUntil((async () => {
+      try {
+        const result = await performBackup(env, owner, repoName, actualBranch, "");
+        if (env.KV) {
+          await env.KV.put('manual_backup_result', JSON.stringify({
+            status: result.status,
+            repo: result.repo,
+            branch: result.branch,
+            fileName: result.fileName,
+            fileSize: result.fileSize,
+            message: result.message
+          }), { expirationTtl: 300 });
+        }
+      } catch (e) {
+        console.error("手动备份失败:", e);
+        if (env.KV) {
+          await env.KV.put('manual_backup_result', JSON.stringify({
+            status: 'error',
+            message: e.message
+          }), { expirationTtl: 300 });
+        }
+      }
+    })());
+
+    return Response.json({ 
+      success: true, 
+      branch: actualBranch, 
+      kv: !!env.KV 
+    });
   } catch (e) {
     return Response.json({ success: false, message: e.message }, { status: 500 });
   }
@@ -173,8 +251,8 @@ async function handleTriggerBackup(request, env, ctx) {
 
 // ---------- 组织全量备份 ----------
 async function handleSyncStatus(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
-  if (!env.KV) return Response.json({ success: false, message: "KV 未绑定" }, { status: 500 });
+  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定" }, { status: 500 });
   
   const result = await env.KV.get('sync_result');
   if (!result) return Response.json({ status: 'pending' });
@@ -189,7 +267,7 @@ async function handleSyncOrg(request, env, ctx) {
   }
   try {
     const body = await parseJson(request);
-    const orgName = body.org;
+    const orgName = (body.org || "").trim();
     const limit = parseInt(body.limit, 10) || 10; 
 
     if (!orgName) {
@@ -211,18 +289,28 @@ async function handleSyncOrg(request, env, ctx) {
        return Response.json({ success: false, message: `GitHub API 错误: ${checkRes.status}` }, { status: 500 });
     }
 
-    if (env.KV) await env.KV.delete('sync_result');
+    // 先写入pending状态
+    if (env.KV) {
+      await env.KV.delete('sync_result');
+      await env.KV.put('sync_result', JSON.stringify({ status: 'pending' }), { expirationTtl: 300 });
+    }
+
     ctx.waitUntil(performOrgSync(env, orgName, limit));
-    return Response.json({ success: true, message: `已提交 ${orgName} 的全量备份任务（单次上限 ${limit} 个），请稍后在日志中查看` });
+    return Response.json({ success: true, message: `已提交 ${orgName} 的全量备份任务（单次上限 ${limit} 个），请稍候等待完成` });
   } catch (e) {
     return Response.json({ success: false, message: e.message }, { status: 500 });
   }
 }
 
 async function performOrgSync(env, orgName, limit) {
+  let successCount = 0;
+  let failedCount = 0;
+  let skipped = 0;
   try {
-    if (env.KV) {
-      await env.KV.put('sync_result', JSON.stringify({ status: 'pending' }), { expirationTtl: 300 });
+    // 循环前先检查熔断
+    const pauseCheckStart = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+    if (pauseCheckStart && pauseCheckStart.value === 'true') {
+      throw new Error("备份已被熔断，任务终止");
     }
 
     const res = await fetch(`https://api.github.com/orgs/${orgName}/repos?per_page=100&sort=updated`, {
@@ -236,18 +324,21 @@ async function performOrgSync(env, orgName, limit) {
     if (!res.ok) throw new Error(`获取组织仓库列表失败: ${res.status} ${res.statusText}`);
     const repos = await res.json();
     
-    let count = 0;
-    let skipped = 0;
-
     for (const repo of repos) {
-      if (count >= limit) {
+      // 循环中每次都检查熔断
+      const pauseCheck = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+      if (pauseCheck && pauseCheck.value === 'true') {
+        throw new Error("备份中途因 R2 存储空间不足被熔断");
+      }
+
+      if (successCount + failedCount >= limit) {
         console.log(`已达到单次备份上限 ${limit} 个，停止执行`);
         break; 
       }
 
       const existing = await env.DB.prepare(
-        "SELECT created_at FROM backups WHERE repo_name = ? AND status = 'success' ORDER BY created_at DESC LIMIT 1"
-      ).bind(repo.name).first();
+        "SELECT created_at FROM backups WHERE repo_name = ? AND status IN ('done','success') ORDER BY created_at DESC LIMIT 1"
+      ).bind(repo.full_name).first();
 
       let needsBackup = false;
       if (!existing) {
@@ -265,17 +356,41 @@ async function performOrgSync(env, orgName, limit) {
         continue; 
       }
 
-      console.log(`[${count + 1}/${limit}] 触发备份: ${repo.full_name} (${repo.default_branch})`);
-      await performBackup(env, repo.owner.login, repo.name, repo.default_branch || "main", repo.clone_url);
-      count++;
+      console.log(`[${successCount + failedCount + 1}/${limit}] 触发备份: ${repo.full_name} (${repo.default_branch})`);
+      try {
+        const result = await performBackup(env, repo.owner.login, repo.name, repo.default_branch || "main", repo.clone_url);
+        if (result.status === 'done') {
+          successCount++;
+        } else {
+          failedCount++;
+        }
+      } catch (e) {
+        console.error(`备份 ${repo.full_name} 失败:`, e);
+        failedCount++;
+      }
     }
-    console.log(`组织备份任务结束。本次新备份 ${count} 个仓库，跳过了 ${skipped} 个已备份仓库。`);
-    
+
+    console.log(`组织备份任务结束。成功 ${successCount} 个，失败 ${failedCount} 个，跳过了 ${skipped} 个已备份仓库。`);
+
+    // 检查是否因为空间不足被熔断
+    const pauseState = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+    if (pauseState && pauseState.value === 'true') {
+      if (env.KV) {
+        await env.KV.put('sync_result', JSON.stringify({ 
+          status: 'error', 
+          message: "备份中途因 R2 存储空间不足被熔断。已成功备份 " + successCount + " 个，失败 " + failedCount + " 个，请清理空间后重试。" 
+        }), { expirationTtl: 300 });
+      }
+      return;
+    }
+
     if (env.KV) {
       await env.KV.put('sync_result', JSON.stringify({ 
         status: 'done', 
-        count: count, 
-        skipped: skipped, 
+        successCount: successCount,
+        failedCount: failedCount,
+        skipped: skipped,
+        total: successCount + failedCount,
         org: orgName 
       }), { expirationTtl: 300 });
     }
@@ -284,22 +399,56 @@ async function performOrgSync(env, orgName, limit) {
     if (env.KV) {
       await env.KV.put('sync_result', JSON.stringify({ 
         status: 'error', 
-        message: e.message 
+        message: e.message + "，已成功备份 " + successCount + " 个，失败 " + failedCount + " 个"
       }), { expirationTtl: 300 });
     }
   }
-} // 👈 这是之前缺失的关键大括号
+}
+
+// ---------- 旧备份清理 ----------
+async function cleanupOldBackups(env, repoFullName, branch) {
+  try {
+    const { results: oldBackups } = await env.DB.prepare(`
+      SELECT id, file_name FROM backups 
+      WHERE repo_name = ? AND branch = ? AND status IN ('done','success')
+      ORDER BY created_at DESC
+      LIMIT -1 OFFSET ?
+    `).bind(repoFullName, branch, BACKUP_RETAIN_COUNT).all();
+    
+    for (const backup of oldBackups) {
+      try {
+        await env.BUCKET.delete(backup.file_name);
+        await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(backup.id).run();
+        console.log(`[清理旧备份] 已删除超出保留数量的旧备份: ${backup.file_name}`);
+      } catch (e) {
+        console.error(`[清理旧备份] 删除失败: ${backup.file_name}`, e);
+      }
+    }
+  } catch (e) {
+    console.error("清理旧备份失败:", e);
+  }
+}
 
 // ---------- 备份执行 ----------
 async function performBackup(env, owner, repoName, branch, cloneUrl) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const fileName = `${owner}-${repoName}-${branch}-${timestamp}.tar.gz`;
-  let status = "failed";
+  const repoFullName = `${owner}/${repoName}`;
+  let status = "error";
   let errorMsg = "";
   let fileSize = 0;
   try {
     if (!env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN is not configured");
     if (!env.BUCKET) throw new Error("R2 BUCKET binding is missing");
+
+    // 提前检查熔断状态
+    const pauseCheck = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+    if (pauseCheck && pauseCheck.value === 'true') {
+      throw new Error("可用空间不足，已暂停所有备份功能。请手动清理历史备份并在管理面板点击恢复。");
+    }
+
+    // 只要当前已用空间 + 100KB 超过上限，就会触发熔断
+    await checkAndCleanSpace(env, 1024 * 100);
 
     const tarballUrl = `https://api.github.com/repos/${owner}/${repoName}/tarball/refs/heads/${branch}`;
     const response = await fetch(tarballUrl, {
@@ -312,12 +461,14 @@ async function performBackup(env, owner, repoName, branch, cloneUrl) {
     if (!response.ok) {
       throw new Error(`GitHub API Error: ${response.status} ${response.statusText}`);
     }
-    if (!response.body) {
-      throw new Error("GitHub API returned no body");
-    }
 
     const lengthHeader = response.headers.get("Content-Length");
     const contentLength = lengthHeader ? Number(lengthHeader) : NaN;
+
+    // 调用容量检查
+    if (Number.isFinite(contentLength) && contentLength > 0) {
+      await checkAndCleanSpace(env, contentLength);
+    }
 
     if (Number.isFinite(contentLength) && contentLength > 0) {
       const { readable, writable } = new FixedLengthStream(contentLength);
@@ -331,78 +482,107 @@ async function performBackup(env, owner, repoName, branch, cloneUrl) {
       console.warn("No Content-Length from GitHub, falling back to buffered upload");
       const buf = await response.arrayBuffer();
       fileSize = buf.byteLength;
+      await checkAndCleanSpace(env, fileSize);
       await env.BUCKET.put(fileName, new Uint8Array(buf), {
         httpMetadata: { contentType: "application/gzip" }
       });
     }
 
-    status = "success";
+    status = "done";
+    errorMsg = "备份成功";
     console.log(`Backup successful: ${fileName}, size: ${fileSize} bytes`);
   } catch (e) {
-    status = "failed";
+    status = "error";
     errorMsg = e.message;
-    console.error(`Backup failed for ${repoName}: ${errorMsg}`, e.stack || "");
+    console.error(`Backup failed for ${repoFullName}: ${errorMsg}`, e.stack || "");
   } finally {
     try {
       if (env.DB) {
         await env.DB.prepare(
           "INSERT INTO backups (repo_name, branch, file_name, file_size, status, error_msg, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        ).bind(repoName, branch, fileName, fileSize, status, errorMsg, new Date().toISOString()).run();
-        await cleanupOldBackups(env, repoName, branch);
+        ).bind(repoFullName, branch, fileName, fileSize, status, errorMsg, new Date().toISOString()).run();
+        if (status === 'done') {
+          await cleanupOldBackups(env, repoFullName, branch);
+        }
       } else {
         console.warn("D1 DB binding is missing, skipping log entry.");
       }
     } catch (dbError) {
       console.error("Failed to log to D1:", dbError);
+      if (!errorMsg) errorMsg = dbError.message;
+      status = "error";
     }
   }
+
+  return {
+    status,
+    repo: repoFullName,
+    branch,
+    fileName,
+    fileSize,
+    message: errorMsg
+  };
 }
 
-async function cleanupOldBackups(env, repoName, branch) {
-  const successRetain = parseInt(env.BACKUP_RETAIN_COUNT, 10);
-  const failedRetain = parseInt(env.BACKUP_FAILED_RETAIN_COUNT, 10);
-  const keepSuccess = Number.isFinite(successRetain) && successRetain >= 1 ? successRetain : 5;
-  const keepFailed = Number.isFinite(failedRetain) && failedRetain >= 0 ? failedRetain : 20;
+async function checkAndCleanSpace(env, incomingSize = 0) {
+  const setting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'r2_max_gb'").first();
+  const maxGB = parseFloat(setting ? setting.value : "10");
+  const maxBytes = maxGB * 1024 * 1024 * 1024;
+  
+  const { total } = await env.DB.prepare(
+    "SELECT SUM(file_size) as total FROM backups WHERE status IN ('done','success')"
+  ).first();
+  let currentSize = total || 0;
 
-  try {
-    const { results: oldSuccess } = await env.DB.prepare(
-      "SELECT id, file_name FROM backups WHERE repo_name = ? AND branch = ? AND status = 'success' ORDER BY created_at DESC LIMIT -1 OFFSET ?"
-    ).bind(repoName, branch, keepSuccess).all();
-
-    for (const old of oldSuccess) {
-      let r2Deleted = false;
-      try {
-        await env.BUCKET.delete(old.file_name);
-        r2Deleted = true;
-      } catch (e) {
-        console.error(`清理 R2 失败，保留 DB 记录待重试: ${old.file_name}`, e);
-      }
-      if (r2Deleted) {
-        try {
-          await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(old.id).run();
-        } catch (e) {
-          console.error(`清理 DB 失败，下次重试: id=${old.id}`, e);
-        }
-      }
-    }
-  } catch (e) {
-    console.error("清理成功备份失败:", e);
+  // 如果空间够了，直接自动解除之前可能存在的熔断
+  if (currentSize + incomingSize <= maxBytes) {
+    await env.DB.prepare("UPDATE settings SET value = 'false' WHERE key = 'backup_paused'").run();
+    return;
   }
 
-  try {
-    const { results: oldFailed } = await env.DB.prepare(
-      "SELECT id FROM backups WHERE repo_name = ? AND branch = ? AND status = 'failed' ORDER BY created_at DESC LIMIT -1 OFFSET ?"
-    ).bind(repoName, branch, keepFailed).all();
+  // 如果空间不够，且已经熔断了，就拦截
+  const pauseState = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+  if (pauseState && pauseState.value === 'true') {
+    throw new Error("可用空间不足，已暂停所有备份功能。请手动清理历史备份并在管理面板点击恢复。");
+  }
 
-    for (const old of oldFailed) {
-      try {
-        await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(old.id).run();
-      } catch (e) {
-        console.error(`清理失败记录 DB 失败: id=${old.id}`, e);
-      }
+  console.warn(`[容量预警] 空间不足（已用 ${(currentSize/1024/1024).toFixed(2)}MB / 上限 ${maxGB}GB），开始智能清理冗余备份...`);
+
+  // 智能清理：保留每个库最新的一条，删除其余的
+  const { results: redundantBackups } = await env.DB.prepare(`
+    WITH RankedBackups AS (
+      SELECT id, file_name, file_size,
+             ROW_NUMBER() OVER (PARTITION BY repo_name, branch ORDER BY created_at DESC) as rn
+      FROM backups
+      WHERE status IN ('done','success')
+    )
+    SELECT id, file_name, file_size FROM RankedBackups 
+    WHERE rn > 1 
+    ORDER BY id ASC
+  `).all();
+
+  for (const backup of redundantBackups) {
+    if (currentSize + incomingSize <= maxBytes) break; 
+    try {
+      await env.BUCKET.delete(backup.file_name);
+      await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(backup.id).run();
+      currentSize -= backup.file_size;
+      console.log(`[容量清理] 已删除冗余历史备份: ${backup.file_name} (释放 ${(backup.file_size/1024/1024).toFixed(2)}MB)`);
+    } catch (e) {
+      console.error(`[容量清理] 删除失败: ${backup.file_name}`, e);
     }
-  } catch (e) {
-    console.error("清理失败备份失败:", e);
+  }
+
+  // 如果删光了冗余记录，空间还是不够，触发熔断
+  if (currentSize + incomingSize > maxBytes) {
+    try {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_paused', 'true')"
+      ).run();
+    } catch (e) {
+      console.error("写入熔断状态失败:", e);
+    }
+    throw new Error("所有仓库均已只剩最新备份，空间依然不足。系统已自动暂停备份，请在管理面板清理并解除暂停。");
   }
 }
 
@@ -410,12 +590,12 @@ async function cleanupOldBackups(env, repoName, branch) {
 async function handleAdminUI(request, env) {
   if (!isAuthed(request, env)) {
     return new Response(loginPageHtml(), {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       status: 200
     });
   }
   return new Response(adminPageHtml(), {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     status: 200
   });
 }
@@ -442,44 +622,44 @@ function loginPageHtml() {
       else { document.getElementById('msg').textContent = '密码错误'; }
     }
     document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-  </script>
+  <\/script>
 </body></html>`;
 }
 
 function adminPageHtml() {
   return `<!DOCTYPE html>
+<!-- v2.10 2026-11-22: 管理页布局优化，筛选仓库移至标题行左侧、标题靠右，刷新/退出按钮移至手动备份行右侧 -->
 <html lang="zh-CN"><head><meta charset="UTF-8"><title>备份日志管理</title>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:20px;background:#f6f8fa;}
-  .container{max-width:1100px;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);}
+  .container{max-width:1200px;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);}
   h1{color:#24292e;}
   table{width:100%;border-collapse:collapse;margin-top:20px;table-layout:fixed;}
   th,td{padding:12px;text-align:left;border-bottom:1px solid #e1e4e8;word-break:break-all;}
   th{background:#f6f8fa;font-weight:600;}
   .status-success{color:#28a745;font-weight:bold;}
   .status-failed{color:#d73a49;font-weight:bold;}
-  .refresh-btn{background:#007bff;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;float:right;}
+  .refresh-btn{background:#007bff;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;}
   .btn{padding:4px 10px;border:none;border-radius:4px;cursor:pointer;font-size:14px;color:#fff;text-decoration:none;display:inline-block;margin-right:6px;}
   .btn-download{background:#28a745;}
   .btn-delete{background:#d73a49;}
   .btn:disabled{opacity:.6;cursor:not-allowed;}
-  .col-time{width:160px;}.col-repo{width:150px;}.col-branch{width:100px;}.col-size{width:90px;}.col-status{width:70px;}.col-action{width:130px;}
+  .col-time{width:160px;}.col-repo{width:180px;}.col-branch{width:100px;}.col-size{width:90px;}.col-status{width:70px;}.col-action{width:130px;}
 </style></head>
 <body>
 <div class="container">
-  <button class="refresh-btn" onclick="loadLogs()">刷新日志</button>
-  <button class="refresh-btn" style="background:#6c757d;margin-right:8px;" onclick="logout()">退出</button>
-  <div style="margin-top: 20px; display: flex; align-items: center; gap: 10px;">
-  <label for="repoFilter" style="font-weight: 600; color: #24292e;">筛选仓库：</label>
-  <select id="repoFilter" onchange="renderTable()" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;">
-  <option value="">全部仓库</option>
-  </select>
+  <div id="pauseWarning" style="margin-bottom: 20px; padding: 15px; background: #ffebe9; border: 1px solid #ff8182; border-radius: 6px; color: #d73a49; display: none; justify-content: space-between; align-items: center;">
+    <strong>⚠️ R2空间不足，备份无法保存，已暂停所有自动及手动备份功能。请点击下方表格中的“删除”清理一些旧备份，腾出空间后点击右侧按钮恢复。</strong>
+    <button onclick="resumeBackups()" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;">恢复备份</button>
   </div>
-  <div style="margin-top: 16px; padding: 12px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+
+  <div style="margin-top: 20px; padding: 12px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
     <strong>手动备份单库：</strong>
     <input id="manualRepo" type="text" placeholder="owner/repo (如 ycscg-org/github-backup-worker)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 300px;" />
-    <input id="manualBranch" type="text" placeholder="分支 (默认 main)" value="main" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 120px;" />
+    <input id="manualBranch" type="text" placeholder="分支 (留空自动识别 main/master)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 220px;" />
     <button onclick="triggerManualBackup()" style="padding: 6px 16px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始备份</button>
+    <button class="refresh-btn" onclick="loadLogs()" style="margin-left:auto;">刷新日志</button>
+    <button class="refresh-btn" style="background:#6c757d;" onclick="logout()">退出</button>
   </div>
   <div style="margin-top: 16px; padding: 12px; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
     <strong>全量备份组织：</strong>
@@ -492,7 +672,25 @@ function adminPageHtml() {
     <button onclick="syncOrganization()" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始全量备份</button>
     <span style="font-size: 12px; color: #666; width: 100%;">提示：程序会自动跳过已成功备份最新代码的仓库。如果遇到超大仓库导致超时，可把数量改为 1 并单独尝试。</span>
   </div>
-  <h1>GitHub 备份管理</h1>
+  <div style="margin-top: 16px; padding: 12px; background: #eef2f5; border: 1px solid #cbd5e1; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+    <strong>系统设置：</strong>
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;">
+      R2 最大可用空间：
+      <input id="r2MaxGb" type="number" step="0.5" value="10" min="1" max="1000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 80px;" />
+      GB
+    </label>
+    <button onclick="saveSettings()" style="padding: 6px 16px; background: #475569; color: #fff; border: none; border-radius: 4px; cursor: pointer;">保存设置</button>
+    <span style="font-size: 12px; color: #666; width: 100%;">提示：如果多个 Worker 共用 R2，请扣除其他项目占用的空间。例如 R2 总额度 10GB，其他占用 3GB，此处填 7。</span>
+  </div>
+  <div style="margin-top: 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <label for="repoFilter" style="font-weight: 600; color: #24292e;">筛选仓库：</label>
+      <select id="repoFilter" onchange="renderTable()" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;">
+        <option value="">全部仓库</option>
+      </select>
+    </div>
+    <h1 style="margin: 0; font-size: 22px;">GitHub 备份管理</h1>
+  </div>
   <table id="logTable">
     <thead><tr>
       <th class="col-time">时间</th><th class="col-repo">仓库</th><th class="col-branch">分支</th>
@@ -519,6 +717,11 @@ let allLogs = [];
 
 async function loadLogs(){
   try {
+    const setRes = await fetch('/api/settings');
+    const setData = await setRes.json();
+    const isPaused = setData.settings && setData.settings.backup_paused === 'true';
+    document.getElementById('pauseWarning').style.display = isPaused ? 'flex' : 'none';
+
     const res = await fetch('/api/logs');
     if (res.status === 401) { location.reload(); return; }
     const data = await res.json();
@@ -526,7 +729,7 @@ async function loadLogs(){
 
     const select = document.getElementById('repoFilter');
     const currentVal = select.value;
-    const repos = [...new Set(allLogs.map(l => l.repo_name))].sort();
+    const repos = [...new Set(allLogs.map(l => l.repo_name).filter(Boolean))].sort();
 
     select.innerHTML = '<option value="">全部仓库</option>';
     repos.forEach(repo => {
@@ -543,10 +746,70 @@ async function loadLogs(){
     document.querySelector('#logTable tbody').innerHTML = '<tr><td colspan="8">加载日志失败</td></tr>';
   }
 }
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    if (res.status === 401) return;
+    const data = await res.json();
+    if (data.success && data.settings.r2_max_gb) {
+      document.getElementById('r2MaxGb').value = data.settings.r2_max_gb;
+    }
+  } catch(e) { console.error("加载设置失败", e); }
+}
+
+async function saveSettings() {
+  const val = document.getElementById('r2MaxGb').value;
+  if (!val || parseFloat(val) < 1) return alert('请输入有效的数值');
+  
+  const btn = document.querySelector('button[onclick="saveSettings()"]');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ r2_max_gb: parseFloat(val) })
+    });
+    const result = await res.json();
+    if (result.success) {
+      alert('设置已更新');
+      loadLogs();
+    } else {
+      alert('保存失败：' + result.message);
+    }
+  } catch(e) {
+    alert('请求失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function resumeBackups() {
+  if (!confirm("确认要恢复备份功能吗？请确保您已经调大了最大可用空间或清理了历史记录。")) return;
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backup_paused: 'false' })
+    });
+    const result = await res.json();
+    if (result.success) {
+      alert('已解除熔断，请刷新页面。');
+      location.reload();
+    } else {
+      alert('恢复失败：' + result.message);
+    }
+  } catch (e) {
+    alert('请求失败：' + e.message);
+  }
+}
 
 async function triggerManualBackup() {
   const repo = document.getElementById('manualRepo').value.trim();
-  const branch = document.getElementById('manualBranch').value.trim() || 'main';
+  const branch = document.getElementById('manualBranch').value.trim();
   
   if (!repo || !repo.includes('/')) {
     alert('请输入正确的仓库格式，例如：ycscg-org/github-backup-worker');
@@ -555,7 +818,7 @@ async function triggerManualBackup() {
 
   const btn = document.querySelector('button[onclick="triggerManualBackup()"]');
   btn.disabled = true;
-  btn.textContent = '提交中...';
+  btn.textContent = '校验仓库...';
 
   try {
     const res = await fetch('/api/backup/trigger', {
@@ -565,17 +828,55 @@ async function triggerManualBackup() {
     });
     const result = await res.json();
     if (result.success) {
-      alert('任务已提交，稍等几秒后点击“刷新日志”查看结果');
-      document.getElementById('manualRepo').value = '';
+      btn.textContent = '备份中...';
+      pollManualStatus(btn);
     } else {
       alert('提交失败：' + result.message);
+      btn.disabled = false;
+      btn.textContent = '开始备份';
     }
   } catch (e) {
     alert('请求失败：' + e.message);
-  } finally {
     btn.disabled = false;
     btn.textContent = '开始备份';
   }
+}
+
+async function pollManualStatus(btn) {
+  let attempts = 0;
+  const poll = async () => {
+    try {
+      attempts++;
+      if (attempts > 60) {
+        alert('备份超时，已等待3分钟，请稍后刷新日志查看结果');
+        btn.disabled = false;
+        btn.textContent = '开始备份';
+        loadLogs();
+        return;
+      }
+      const res = await fetch('/api/backup/trigger-status');
+      const data = await res.json();
+      if (data.status === 'pending') {
+        setTimeout(poll, 3000);
+      } else if (data.status === 'done') {
+        alert('备份成功！\\n仓库：' + data.repo + '\\n分支：' + data.branch + '\\n文件大小：' + formatSize(data.fileSize));
+        document.getElementById('manualRepo').value = '';
+        document.getElementById('manualBranch').value = '';
+        btn.disabled = false;
+        btn.textContent = '开始备份';
+        loadLogs();
+      } else if (data.status === 'error') {
+        alert('备份失败：' + data.message);
+        btn.disabled = false;
+        btn.textContent = '开始备份';
+        loadLogs();
+      }
+    } catch (e) {
+      console.error('轮询备份状态失败', e);
+      setTimeout(poll, 3000);
+    }
+  };
+  poll();
 }
 
 let isPolling = false; 
@@ -598,6 +899,7 @@ async function syncOrganization() {
   btn.disabled = true;
   btn.textContent = '后台执行中 (请稍候)...';
   btn.setAttribute('data-poll-attempts', '0');
+  isPolling = false;
 
   try {
     const res = await fetch('/api/backup/sync-org', {
@@ -616,11 +918,13 @@ async function syncOrganization() {
       alert('提交失败：' + result.message);
       btn.disabled = false;
       btn.textContent = originalText;
+      loadLogs();
     }
   } catch (e) {
     alert('请求失败：' + e.message);
     btn.disabled = false;
     btn.textContent = originalText;
+    loadLogs();
   }
 }
 
@@ -631,11 +935,12 @@ async function pollSyncStatus(btn, originalText) {
 
     if (data.status === 'pending') {
       const attempts = parseInt(btn.getAttribute('data-poll-attempts') || '0', 10);
-      if (attempts >= 30) {
+      if (attempts >= 60) {
         isPolling = false;
         btn.disabled = false;
         btn.textContent = originalText;
         alert('后台任务超时，可能因仓库过大导致 Worker 执行超时被中断。请稍后刷新日志查看。');
+        loadLogs();
         return;
       }
       btn.setAttribute('data-poll-attempts', attempts + 1);
@@ -644,13 +949,14 @@ async function pollSyncStatus(btn, originalText) {
       isPolling = false;
       btn.disabled = false;
       btn.textContent = originalText;
-      alert('备份完成！本次新备份：' + data.count + ' 个仓库，跳过已备份：' + data.skipped + ' 个仓库');
+      alert('备份完成！\\n成功：' + data.successCount + ' 个\\n失败：' + data.failedCount + ' 个\\n跳过：' + data.skipped + ' 个');
       loadLogs();
     } else if (data.status === 'error') {
       isPolling = false;
       btn.disabled = false;
       btn.textContent = originalText;
       alert('备份任务失败：' + data.message);
+      loadLogs();
     }
   } catch (e) {
     console.error("轮询状态失败", e);
@@ -674,24 +980,28 @@ function renderTable(){
 
   filteredLogs.forEach(log => {
     const tr = document.createElement('tr');
-    const canOperate = log.status === 'success' && log.file_name;
+    // 兼容新旧两种状态值：旧版是success/failed，新版是done/error
+    const isSuccess = log.status === 'done' || log.status === 'success';
+    const canOperate = isSuccess && log.file_name;
+    const statusText = isSuccess ? '成功' : (log.status === 'error' || log.status === 'failed') ? '失败' : '未知';
     const cells = [
-      new Date(log.created_at).toLocaleString('zh-CN'),
-      log.repo_name, log.branch,
+      log.created_at ? new Date(log.created_at).toLocaleString('zh-CN') : '-',
+      log.repo_name || '-',
+      log.branch || '-',
       log.file_name || '-',
       formatSize(log.file_size),
-      log.status === 'success' ? '成功' : '失败',
-      log.error_msg || ''
+      statusText,
+      log.error_msg || '-'
     ];
     cells.forEach((v,i) => {
       const td = document.createElement('td');
       td.textContent = v;
-      if (i === 5) td.className = log.status === 'success' ? 'status-success' : 'status-failed';
+      if (i === 5) td.className = isSuccess ? 'status-success' : 'status-failed';
       tr.appendChild(td);
     });
     const tdAction = document.createElement('td');
     if (log.file_name) {
-      if (log.status === 'success') {
+      if (isSuccess) {
         const a = document.createElement('a');
         a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
         a.className = 'btn btn-download'; a.textContent = '下载';
@@ -708,6 +1018,7 @@ function renderTable(){
     tbody.appendChild(tr);
   });
 }
+loadSettings();
 loadLogs();
 <\/script>
 </body></html>`;
@@ -731,6 +1042,44 @@ async function handleGetLogs(request, env) {
       { status: 500, headers: { "Content-Type": "application/json" } });
   }
 }
+// 获取设置
+async function handleGetSettings(request, env) {
+  if (!isAuthed(request, env)) return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  try {
+    const { results } = await env.DB.prepare("SELECT key, value FROM settings").all();
+    const settings = {};
+    for (const row of results) {
+      settings[row.key] = row.value;
+    }
+    return Response.json({ success: true, settings });
+  } catch (e) {
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
+
+// 保存设置
+async function handleSaveSettings(request, env) {
+  if (!isAuthed(request, env)) return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  try {
+    const body = await parseJson(request);
+    
+    if (body.r2_max_gb !== undefined) {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('r2_max_gb', ?)"
+      ).bind(body.r2_max_gb.toString()).run();
+    }
+    
+    if (body.backup_paused !== undefined) {
+      await env.DB.prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_paused', ?)"
+      ).bind(body.backup_paused).run();
+    }
+    
+    return Response.json({ success: true, message: "设置已保存" });
+  } catch (e) {
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
 
 // ---------- API：下载 ----------
 async function handleDownloadBackup(request, env) {
@@ -742,7 +1091,7 @@ async function handleDownloadBackup(request, env) {
 
   if (!env.DB) return new Response("D1 DB not configured", { status: 500 });
   const row = await env.DB.prepare(
-    "SELECT file_name FROM backups WHERE file_name = ? AND status = 'success' LIMIT 1"
+    "SELECT file_name FROM backups WHERE file_name = ? AND status IN ('done','success') LIMIT 1"
   ).bind(fileName).first();
   if (!row) return new Response("备份记录不存在", { status: 404 });
 
@@ -781,7 +1130,7 @@ async function handleDeleteBackup(request, env) {
   if (!row) return Response.json({ success: false, message: "记录不存在" }, { status: 404 });
 
   try {
-    if (row.status === 'success') {
+    if (row.status === 'done' || row.status === 'success') {
       await env.BUCKET.delete(fileName);
     }
     await env.DB.prepare("DELETE FROM backups WHERE file_name = ?").bind(fileName).run();
@@ -792,4 +1141,4 @@ async function handleDeleteBackup(request, env) {
   }
 }
 
-export { index_default as default };
+export default index_default;

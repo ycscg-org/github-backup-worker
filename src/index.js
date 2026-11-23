@@ -1,3 +1,6 @@
+// GitHub Backup Worker v2.18 i18n版 - 独立字典文件 + 相对导入 + 后端错误码 + 所有换行正确转义
+import { dict } from './i18n.js'; // 👈 只 import 字典对象，t/setLang 留给前端去实现
+
 var BACKUP_RETAIN_COUNT_DEFAULT = 5;
 var BACKUP_FAILED_RETAIN_COUNT_DEFAULT = 10; // 失败记录默认保留10条
 
@@ -131,11 +134,11 @@ var index_default = {
 async function handleLogin(request, env) {
   const body = await parseJson(request);
   if (!body || typeof body.password !== "string") {
-    return new Response(JSON.stringify({ success: false, message: "缺少密码" }),
+    return new Response(JSON.stringify({ success: false, errorCode: 'errMissingPassword' }),
       { status: 400, headers: { "Content-Type": "application/json" } });
   }
   if (!env.ADMIN_PASSWORD || !timingSafeEqual(body.password, env.ADMIN_PASSWORD)) {
-    return new Response(JSON.stringify({ success: false, message: "密码错误" }),
+    return new Response(JSON.stringify({ success: false, errorCode: 'errPasswordWrong' }),
       { status: 401, headers: { "Content-Type": "application/json" } });
   }
   return new Response(JSON.stringify({ success: true }),
@@ -197,8 +200,8 @@ async function hmacSha256Hex(secret, data) {
 
 // ---------- 单库备份状态查询 ----------
 async function handleTriggerStatus(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
-  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定" }, { status: 500 });
+  if (!isAuthed(request, env)) return Response.json({ status: "error", errorCode: "errUnauthorized" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: "error", errorCode: "errKvNotBound" }, { status: 500 });
   
   const result = await env.KV.get('manual_backup_result');
   if (!result) return Response.json({ status: 'pending' });
@@ -210,7 +213,7 @@ async function handleTriggerStatus(request, env) {
 // ---------- 手动备份 ----------
 async function handleTriggerBackup(request, env, ctx) {
   if (!isAuthed(request, env)) {
-    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+    return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   }
   try {
     const body = await parseJson(request);
@@ -218,12 +221,12 @@ async function handleTriggerBackup(request, env, ctx) {
     const branch = (body.branch || "").trim();
 
     if (!repoFullName || !repoFullName.includes("/")) {
-      return Response.json({ success: false, message: "仓库格式错误，请填写 owner/repo" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errRepoFormat" }, { status: 400 });
     }
 
     const [owner, repoName] = repoFullName.split("/");
     if (!owner || !repoName) {
-      return Response.json({ success: false, message: "仓库格式错误，请填写 owner/repo" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errRepoFormat" }, { status: 400 });
     }
 
     // 校验仓库存在并获取默认分支
@@ -236,7 +239,7 @@ async function handleTriggerBackup(request, env, ctx) {
     });
 
     if (repoRes.status === 404) {
-      return Response.json({ success: false, message: `仓库 "${owner}/${repoName}" 不存在，请检查拼写` }, { status: 404 });
+      return Response.json({ success: false, errorCode: 'errRepoNotFound', params: {repo: `${owner}/${repoName}`} }, { status: 404 });
     }
     if (!repoRes.ok) {
       return Response.json({ success: false, message: `GitHub API 错误: ${repoRes.status}` }, { status: 500 });
@@ -288,8 +291,8 @@ async function handleTriggerBackup(request, env, ctx) {
 
 // ---------- 组织全量备份 ----------
 async function handleSyncStatus(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
-  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定" }, { status: 500 });
+  if (!isAuthed(request, env)) return Response.json({ status: "error", errorCode: "errUnauthorized" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: "error", errorCode: "errKvNotBound" }, { status: 500 });
   
   const result = await env.KV.get('sync_result');
   if (!result) return Response.json({ status: 'pending' });
@@ -300,7 +303,7 @@ async function handleSyncStatus(request, env) {
 
 async function handleSyncOrg(request, env, ctx) {
   if (!isAuthed(request, env)) {
-    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+    return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   }
   try {
     const body = await parseJson(request);
@@ -308,7 +311,7 @@ async function handleSyncOrg(request, env, ctx) {
     const limit = parseInt(body.limit, 10) || 10; 
 
     if (!orgName) {
-      return Response.json({ success: false, message: "请填写组织名称" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errInputOrgName" }, { status: 400 });
     }
 
     const checkRes = await fetch(`https://api.github.com/orgs/${orgName}/repos?per_page=1`, {
@@ -320,7 +323,7 @@ async function handleSyncOrg(request, env, ctx) {
     });
 
     if (checkRes.status === 404) {
-      return Response.json({ success: false, message: `组织 "${orgName}" 不存在，请检查拼写` }, { status: 404 });
+      return Response.json({ success: false, errorCode: 'errOrgNotFound', params: {org: orgName} }, { status: 404 });
     }
     if (!checkRes.ok && checkRes.status !== 403) {
        return Response.json({ success: false, message: `GitHub API 错误: ${checkRes.status}` }, { status: 500 });
@@ -415,7 +418,8 @@ async function performOrgSync(env, orgName, limit) {
       if (env.KV) {
         await env.KV.put('sync_result', JSON.stringify({ 
           status: 'error', 
-          message: "备份中途因 R2 存储空间不足被熔断。已成功备份 " + successCount + " 个，失败 " + failedCount + " 个，请清理空间后重试。" 
+          errorCode: 'errSyncAbortedMsg',
+          params: { success: successCount, failed: failedCount }
         }), { expirationTtl: 300 });
       }
       return;
@@ -444,8 +448,8 @@ async function performOrgSync(env, orgName, limit) {
 
 // ---------- 备份清理任务状态查询 ----------
 async function handleCleanupStatus(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
-  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定，无法查询清理进度" }, { status: 500 });
+  if (!isAuthed(request, env)) return Response.json({ status: "error", errorCode: "errUnauthorized" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: "error", errorCode: "errKvNotBoundCleanup" }, { status: 500 });
   
   const result = await env.KV.get('cleanup_result');
   if (!result) return Response.json({ status: 'pending' });
@@ -457,7 +461,7 @@ async function handleCleanupStatus(request, env) {
 // ---------- 统计待清理备份数量 ----------
 async function handleCountCleanup(request, env) {
   if (!isAuthed(request, env)) {
-    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+    return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   }
   try {
     const body = await parseJson(request);
@@ -465,10 +469,10 @@ async function handleCountCleanup(request, env) {
     const newFailedRetainCount = parseInt(body.backup_failed_retain_count, 10);
     
     if (!Number.isFinite(newRetainCount) || newRetainCount < 1) {
-      return Response.json({ success: false, message: "成功备份保留数量必须是大于等于1的正整数" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errValidRetain" }, { status: 400 });
     }
     if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) {
-      return Response.json({ success: false, message: "失败记录保留数量必须是大于等于0的整数" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errValidFailedRetain" }, { status: 400 });
     }
 
     // 查询超出保留数量的成功备份总数
@@ -522,7 +526,7 @@ async function handleCountCleanup(request, env) {
 // ---------- 执行批量清理旧备份 ----------
 async function handleCleanupBackups(request, env, ctx) {
   if (!isAuthed(request, env)) {
-    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+    return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   }
   try {
     const body = await parseJson(request);
@@ -530,10 +534,10 @@ async function handleCleanupBackups(request, env, ctx) {
     const newFailedRetainCount = parseInt(body.backup_failed_retain_count, 10);
     
     if (!Number.isFinite(newRetainCount) || newRetainCount < 1) {
-      return Response.json({ success: false, message: "成功备份保留数量必须是大于等于1的正整数" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errValidRetain" }, { status: 400 });
     }
     if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) {
-      return Response.json({ success: false, message: "失败记录保留数量必须是大于等于0的整数" }, { status: 400 });
+      return Response.json({ success: false, errorCode: "errValidFailedRetain" }, { status: 400 });
     }
 
     // 先写入pending状态
@@ -547,7 +551,7 @@ async function handleCleanupBackups(request, env, ctx) {
     
     return Response.json({ 
       success: true, 
-      message: "清理任务已提交，正在后台执行",
+      errorCode: "errCleanupSubmitted",
       kv: !!env.KV
     });
   } catch (e) {
@@ -877,28 +881,82 @@ async function checkAndCleanSpace(env, incomingSize = 0) {
 // ---------- 管理 UI ----------
 async function handleAdminUI(request, env) {
   if (!isAuthed(request, env)) {
-    return new Response(loginPageHtml(), {
+    return new Response(loginPageHtml(dict), {
       headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       status: 200
     });
   }
-  return new Response(adminPageHtml(), {
+  return new Response(adminPageHtml(dict), {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     status: 200
   });
 }
 
-function loginPageHtml() {
+function loginPageHtml(dict) {
   return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>GitHub Backup Admin</title></head>
 <body style="font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f0f2f5;">
-  <div style="background:#fff;padding:2rem;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);">
-    <h2>GitHub Backup Admin</h2>
-    <input id="pw" type="password" placeholder="Admin Password" style="padding:8px;margin-right:8px;border:1px solid #ccc;border-radius:4px;" />
-    <button onclick="login()" style="padding:8px 16px;background:#007bff;color:#fff;border:none;border-radius:4px;cursor:pointer;">Login</button>
+  <div style="background:#fff;padding:2rem;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);position:relative;">
+    <div style="position:absolute;top:1rem;right:1rem;display:flex;gap:4px;" class="lang-switcher">
+      <button id="langZh" onclick="setLang('zh')" data-i18n="zh" data-lang-btn="zh" style="padding:4px 10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;"></button>
+      <button id="langEn" onclick="setLang('en')" data-i18n="en" data-lang-btn="en" style="padding:4px 10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;"></button>
+    </div>
+    <h2 id="loginTitle" data-i18n="loginTitle"></h2>
+    <input id="pw" type="password" data-i18n-placeholder="passwordPlaceholder" style="padding:8px;margin-right:8px;border:1px solid #ccc;border-radius:4px;" />
+    <button onclick="login()" id="loginBtn" data-i18n="loginBtn" style="padding:8px 16px;background:#007bff;color:#fff;border:none;border-radius:4px;cursor:pointer;"></button>
     <p id="msg" style="color:red;min-height:1em;"></p>
   </div>
   <script>
+    const dict = ${JSON.stringify(dict)};
+    let currentLang = 'zh';
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem('backup_manager_lang');
+      if (saved && dict[saved]) currentLang = saved;
+    }
+    function t(key, params) {
+      params = params || {};
+      let text = (dict[currentLang] && dict[currentLang][key]) || dict.zh[key] || key;
+      Object.keys(params).forEach(k => { text = text.split('{' + k + '}').join(params[k]); });
+      return text;
+    }
+    function setLang(lang) {
+      if (!dict[lang]) return;
+      currentLang = lang;
+      if (typeof localStorage !== 'undefined') localStorage.setItem('backup_manager_lang', lang);
+      if (typeof window.applyLoginLang === 'function') window.applyLoginLang();
+    }
+    function getLang() { return currentLang; }
+
+    function applyLoginLang() {
+      const lang = getLang();
+      document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      // 统一遍历所有带data-i18n的元素
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        if (key === 'zh' || key === 'en') return; // 跳过语言按钮自己，统一处理高亮
+        el.textContent = t(key);
+      });
+      // 统一遍历所有带data-i18n-placeholder的元素
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        const key = el.getAttribute('data-i18n-placeholder');
+        el.placeholder = t(key);
+      });
+      // 语言按钮文字和高亮统一处理
+      const langMap = { zh: '中文', en: 'EN' };
+      document.querySelectorAll('[data-lang-btn]').forEach(btn => {
+        const btnLang = btn.getAttribute('data-lang-btn');
+        btn.textContent = langMap[btnLang] || btnLang;
+        if (btnLang === lang) {
+          btn.style.background = '#007bff';
+          btn.style.color = '#fff';
+        } else {
+          btn.style.background = '#fff';
+          btn.style.color = '#333';
+        }
+      });
+    }
+    window.applyLoginLang = applyLoginLang;
+
     async function login() {
       const pw = document.getElementById('pw').value;
       const res = await fetch('/login', {
@@ -907,16 +965,17 @@ function loginPageHtml() {
         body: JSON.stringify({ password: pw })
       });
       if (res.ok) { location.reload(); }
-      else { document.getElementById('msg').textContent = '密码错误'; }
+      else { document.getElementById('msg').textContent = t('wrongPassword'); }
     }
     document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+    applyLoginLang();
   <\/script>
 </body></html>`;
 }
 
-function adminPageHtml() {
+function adminPageHtml(dict) {
   return `<!DOCTYPE html>
-<!-- v2.14 2026-11-23: 熔断状态按需写入减少冗余KV/D1写入；失败记录默认保留10条；标题显示版本号；修复弹窗换行错误 -->
+<!-- v2.20 -->
 <html lang="zh-CN"><head><meta charset="UTF-8"><title>备份日志管理</title>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:20px;background:#f6f8fa;}
@@ -938,509 +997,445 @@ function adminPageHtml() {
 <body>
 <div class="container">
   <div id="pauseWarning" style="margin-bottom: 20px; padding: 15px; background: #ffebe9; border: 1px solid #ff8182; border-radius: 6px; color: #d73a49; display: none; justify-content: space-between; align-items: center;">
-    <strong>⚠️ R2空间不足，备份无法保存，已暂停所有自动及手动备份功能。请点击下方表格中的“删除”清理一些旧备份，腾出空间后点击右侧按钮恢复。</strong>
-    <button onclick="resumeBackups()" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;">恢复备份</button>
+    <strong id="pauseWarningText" data-i18n="pauseWarning"></strong>
+    <button id="resumeBtn" onclick="resumeBackups()" data-i18n="resumeBackup" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;"></button>
   </div>
 
   <div style="margin-top: 20px; padding: 12px; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-    <strong>手动备份单库：</strong>
-    <input id="manualRepo" type="text" placeholder="owner/repo (如 ycscg-org/github-backup-worker)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 300px;" />
-    <input id="manualBranch" type="text" placeholder="分支 (留空自动识别 main/master)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 220px;" />
-    <button onclick="triggerManualBackup()" style="padding: 6px 16px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始备份</button>
-    <button class="refresh-btn" onclick="loadLogs()" style="margin-left:auto;">刷新日志</button>
-    <button class="refresh-btn" style="background:#6c757d;" onclick="logout()">退出</button>
+    <strong id="manualBackupTitle" data-i18n="manualBackupTitle"></strong>
+    <input id="manualRepo" type="text" data-i18n-placeholder="manualRepoPlaceholder" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 300px;" />
+    <input id="manualBranch" type="text" data-i18n-placeholder="manualBranchPlaceholder" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 220px;" />
+    <button id="startBackupBtn" onclick="triggerManualBackup()" data-i18n="startBackup" style="padding: 6px 16px; background: #007bff; color: #fff; border: none; border-radius: 4px; cursor: pointer;"></button>
+    <button class="refresh-btn" id="refreshBtn" onclick="loadLogs()" data-i18n="refreshLogs" style="margin-left:auto;"></button>
+    <button class="refresh-btn" id="logoutBtn" style="background:#6c757d;" onclick="logout()" data-i18n="logout"></button>
   </div>
   <div style="margin-top: 16px; padding: 12px; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-    <strong>全量备份组织：</strong>
-    <input id="syncOrgName" type="text" placeholder="组织名 (如 ycscg-org)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 180px;" />
+    <strong id="fullBackupTitle" data-i18n="fullBackupTitle"></strong>
+    <input id="syncOrgName" type="text" data-i18n-placeholder="orgPlaceholder" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 180px;" />
     <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
-      单次最多备份：
+      <span id="maxPerRunLabel" data-i18n="maxPerRun"></span>
       <input id="syncLimit" type="number" value="10" min="1" max="100" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 60px;" />
-      个
+      <span id="unitLabel" data-i18n="unit"></span>
     </label>
-    <button onclick="syncOrganization()" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;">开始全量备份</button>
-    <span style="font-size: 12px; color: #666; width: 100%;">提示：程序会自动跳过已成功备份最新代码的仓库。如果遇到超大仓库导致超时，可把数量改为 1 并单独尝试。</span>
+    <button id="startFullBackupBtn" onclick="syncOrganization()" data-i18n="startFullBackup" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;"></button>
+    <span id="fullBackupHint" data-i18n="fullBackupHint" style="font-size: 12px; color: #666; width: 100%;"></span>
   </div>
   <div style="margin-top: 16px; padding: 12px; background: #eef2f5; border: 1px solid #cbd5e1; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-    <strong>系统设置：</strong>
+    <strong id="settingsTitle" data-i18n="settingsTitle"></strong>
     <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
-      R2 最大可用空间：
+      <span id="r2MaxSpaceLabel" data-i18n="r2MaxSpace"></span>
       <input id="r2MaxGb" type="number" step="0.5" value="8" min="1" max="1000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 80px;" />
-      GB
+      <span id="gbUnitLabel" data-i18n="gbUnit"></span>
     </label>
     <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
-      每个仓库/分支最多保留备份：
+      <span id="retainCountLabel" data-i18n="retainCount"></span>
       <input id="backupRetainCount" type="number" value="5" min="1" max="100" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 60px;" />
-      个
+      <span id="backupsUnitLabel" data-i18n="backupsUnit"></span>
     </label>
     <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
-      失败记录最多保留：
-      <input id="failedRetainCount" type="number" value="100" min="0" max="10000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 70px;" />
-      条
+      <span id="failedRetainCountLabel" data-i18n="failedRetainCount"></span>
+      <input id="failedRetainCount" type="number" value="10" min="0" max="10000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 70px;" />
+      <span id="recordsUnitLabel" data-i18n="recordsUnit"></span>
     </label>
-    <button onclick="saveSettings()" style="padding: 6px 16px; background: #475569; color: #fff; border: none; border-radius: 4px; cursor: pointer;">保存设置</button>
-    <span style="font-size: 12px; color: #666; width: 100%;">提示：1. 请根据你的CF计划类型合理设置最大使用R2空间限制；2. 调低成功备份保留数量会自动删除超出数量的旧备份（不可恢复）；3. 失败记录设为0将删除所有历史失败记录，相当于一键清空失败日志。</span>
+    <button id="saveSettingsBtn" onclick="saveSettings()" data-i18n="save" style="padding: 6px 16px; background: #475569; color: #fff; border: none; border-radius: 4px; cursor: pointer;"></button>
+    <span id="settingsHint" data-i18n="settingsHint" style="font-size: 12px; color: #666; width: 100%;"></span>
   </div>
   <div style="margin-top: 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
     <div style="display: flex; align-items: center; gap: 8px;">
-      <label for="repoFilter" style="font-weight: 600; color: #24292e;">筛选仓库：</label>
+      <label for="repoFilter" id="filterRepoLabel" data-i18n="filterRepo" style="font-weight: 600; color: #24292e;"></label>
       <select id="repoFilter" onchange="renderTable()" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;">
-        <option value="">全部仓库</option>
+        <option value="" data-i18n="allRepos"></option>
       </select>
     </div>
-    <h1 style="margin: 0; font-size: 22px;">GitHub 备份管理 v2.14</h1>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h1 id="pageTitle" style="margin: 0; font-size: 22px;"></h1>
+      <div style="display:flex; gap:4px;" class="lang-switcher">
+        <button id="langZh" onclick="setLang('zh')" data-lang-btn="zh" style="padding:4px 10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;"></button>
+        <button id="langEn" onclick="setLang('en')" data-lang-btn="en" style="padding:4px 10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;"></button>
+      </div>
+    </div>
   </div>
   <table id="logTable">
     <thead><tr>
-      <th class="col-time">时间</th><th class="col-repo">仓库</th><th class="col-branch">分支</th>
-      <th>文件名</th><th class="col-size">大小</th><th class="col-status">状态</th>
-      <th>错误信息</th><th class="col-action">操作</th>
+      <th class="col-time" data-i18n="tableTime"></th><th class="col-repo" data-i18n="tableRepo"></th><th class="col-branch" data-i18n="tableBranch"></th>
+      <th data-i18n="tableFileName"></th><th class="col-size" data-i18n="tableSize"></th><th class="col-status" data-i18n="tableStatus"></th>
+      <th data-i18n="tableError"></th><th class="col-action" data-i18n="tableAction"></th>
     </tr></thead>
-    <tbody><tr><td colspan="8">加载中...</td></tr></tbody>
+    <tbody><tr><td colspan="8" data-i18n="loading"></td></tr></tbody>
   </table>
 </div>
 <script>
-function formatSize(bytes){ if(!bytes||bytes===0) return '未知'; const u=['B','KB','MB','GB']; const i=Math.floor(Math.log(bytes)/Math.log(1024)); return (bytes/Math.pow(1024,i)).toFixed(2)+' '+u[i]; }
-async function logout(){ await fetch('/logout',{method:'POST'}); location.reload(); }
-async function deleteBackup(fileName, btn){
-  if(!confirm('确定要删除记录「'+fileName+'」吗？此操作不可恢复！')) return;
-  btn.disabled = true; btn.textContent = '删除中...';
-  try {
-    const res = await fetch('/api/backup/delete?file=' + encodeURIComponent(fileName), { method:'DELETE' });
-    const result = await res.json();
-    if (result.success) { alert('删除成功'); loadLogs(); }
-    else { alert('删除失败：' + (result.message || '未知错误')); btn.disabled = false; btn.textContent = '删除'; }
-  } catch(e) { alert('删除失败：' + e.message); btn.disabled = false; btn.textContent = '删除'; }
-}
-let allLogs = []; 
-
-async function loadLogs(){
-  try {
-    const setRes = await fetch('/api/settings');
-    const setData = await setRes.json();
-    const isPaused = setData.settings && setData.settings.backup_paused === 'true';
-    document.getElementById('pauseWarning').style.display = isPaused ? 'flex' : 'none';
-
-    const res = await fetch('/api/logs');
-    if (res.status === 401) { location.reload(); return; }
-    const data = await res.json();
-    allLogs = data.logs || [];
-
-    const select = document.getElementById('repoFilter');
-    const currentVal = select.value;
-    const repos = [...new Set(allLogs.map(l => l.repo_name).filter(Boolean))].sort();
-
-    select.innerHTML = '<option value="">全部仓库</option>';
-    repos.forEach(repo => {
-      const opt = document.createElement('option');
-      opt.value = repo;
-      opt.textContent = repo;
-      select.appendChild(opt);
-    });
-    if (repos.includes(currentVal)) select.value = currentVal;
-
-    renderTable();
-  } catch(e) {
-    console.error(e);
-    document.querySelector('#logTable tbody').innerHTML = '<tr><td colspan="8">加载日志失败</td></tr>';
-  }
-}
-async function loadSettings() {
-  try {
-    const res = await fetch('/api/settings');
-    if (res.status === 401) return;
-    const data = await res.json();
-    if (data.success) {
-      if (data.settings.r2_max_gb) {
-        document.getElementById('r2MaxGb').value = data.settings.r2_max_gb;
-      }
-      if (data.settings.backup_retain_count) {
-        document.getElementById('backupRetainCount').value = data.settings.backup_retain_count;
-      }
-      if (data.settings.backup_failed_retain_count !== undefined) {
-        document.getElementById('failedRetainCount').value = data.settings.backup_failed_retain_count;
-      }
+    const dict = ${JSON.stringify(dict)};
+    let currentLang = 'zh';
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem('backup_manager_lang');
+      if (saved && dict[saved]) currentLang = saved;
     }
-  } catch(e) { console.error("加载设置失败", e); }
-}
-
-async function saveSettings() {
-  const r2MaxGbVal = document.getElementById('r2MaxGb').value;
-  const retainCountVal = document.getElementById('backupRetainCount').value;
-  const failedRetainCountVal = document.getElementById('failedRetainCount').value;
-  const newRetainCount = parseInt(retainCountVal, 10);
-  const newFailedRetainCount = parseInt(failedRetainCountVal, 10);
-  
-  if (!r2MaxGbVal || parseFloat(r2MaxGbVal) < 1) return alert('请输入有效的R2最大空间数值');
-  if (!Number.isFinite(newRetainCount) || newRetainCount < 1) return alert('请输入有效的成功备份保留数量（≥1）');
-  if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) return alert('请输入有效的失败记录保留数量（≥0，0表示不保留任何失败记录）');
-  
-  const btn = document.querySelector('button[onclick="saveSettings()"]');
-  const originalText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '保存中...';
-  
-  try {
-    // 先统计如果调整保留数量需要删除多少备份
-    let successDeleteCount = 0;
-    let failedDeleteCount = 0;
-    const countRes = await fetch('/api/backup/cleanup-count', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        backup_retain_count: newRetainCount,
-        backup_failed_retain_count: newFailedRetainCount
-      })
-    });
-    const countData = await countRes.json();
-    if (!countData.success) {
-      throw new Error(countData.message || '统计待删除备份失败');
+    function t(key, params) {
+      params = params || {};
+      let text = (dict[currentLang] && dict[currentLang][key]) || dict.zh[key] || key;
+      Object.keys(params).forEach(k => { text = text.split('{' + k + '}').join(params[k]); });
+      return text;
     }
-    successDeleteCount = countData.successDeleteCount;
-    failedDeleteCount = countData.failedDeleteCount;
-    const totalDeleteCount = countData.deleteCount;
+    function setLang(lang) {
+      if (!dict[lang]) return;
+      currentLang = lang;
+      if (typeof localStorage !== 'undefined') localStorage.setItem('backup_manager_lang', lang);
+      if (typeof window.applyLang === 'function') window.applyLang();
+    }
+    function getLang() { return currentLang; }
 
-    // 如果有需要删除的备份，弹窗确认
-    if (totalDeleteCount > 0) {
-      let confirmMsg = '此操作将删除：\\n';
-      if (successDeleteCount > 0) confirmMsg += "- " + successDeleteCount + " 个超出保留数量的成功备份（含R2文件）\\n";
-      if (failedDeleteCount > 0) {
-        if (newFailedRetainCount === 0) {
-          confirmMsg += "- " + failedDeleteCount + " 条历史失败记录（清空所有失败日志）\\n";
-        } else {
-          confirmMsg += "- " + failedDeleteCount + " 条超出保留数量的失败记录\\n";
+    let allLogs = [];
+    let isPolling = false;
+
+    function formatSize(bytes){ if(!bytes||bytes===0) return t('unknown'); const u=['B','KB','MB','GB']; const i=Math.floor(Math.log(bytes)/Math.log(1024)); return (bytes/Math.pow(1024,i)).toFixed(2)+' '+u[i]; }
+
+    function applyLang() {
+      const lang = getLang();
+      document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      // 统一处理所有静态文本：data-i18n 属性
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        // 跳过语言按钮（在下面统一处理高亮）
+        if (key === 'zh' || key === 'en') return;
+        // pageTitle 特殊处理，加版本号
+        if (key === 'pageTitle') {
+          el.textContent = t(key) + ' v2.20';
+          return;
         }
-      }
-      confirmMsg += '合计 ' + totalDeleteCount + ' 条记录，删除后不可恢复，是否继续？';
-      if (!confirm(confirmMsg)) {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        return;
-      }
-
-      // 提交清理任务
-      const cleanupRes = await fetch('/api/backup/cleanup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          backup_retain_count: newRetainCount,
-          backup_failed_retain_count: newFailedRetainCount
-        })
+        el.textContent = t(key);
       });
-      const cleanupResult = await cleanupRes.json();
-      if (!cleanupResult.success) {
-        throw new Error(cleanupResult.message || '提交清理任务失败');
-      }
+      // 统一处理 placeholder
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        const key = el.getAttribute('data-i18n-placeholder');
+        el.placeholder = t(key);
+      });
+      // 统一处理语言按钮文字和高亮
+      const langMap = { zh: '中文', en: 'EN' };
+      document.querySelectorAll('[data-lang-btn]').forEach(btn => {
+        const btnLang = btn.getAttribute('data-lang-btn');
+        btn.textContent = langMap[btnLang] || btnLang;
+        if (btnLang === lang) {
+          btn.style.background = '#007bff';
+          btn.style.color = '#fff';
+        } else {
+          btn.style.background = '#fff';
+          btn.style.color = '#333';
+        }
+      });
+      // 重新生成仓库下拉选项（翻译"全部仓库"）
+      const select = document.getElementById('repoFilter');
+      const currentVal = select.value;
+      select.innerHTML = '';
+      const allOpt = document.createElement('option');
+      allOpt.value = '';
+      allOpt.textContent = t('allRepos');
+      select.appendChild(allOpt);
+      const repos = [...new Set(allLogs.map(l => l.repo_name).filter(Boolean))].sort();
+      repos.forEach(repo => {
+        const opt = document.createElement('option');
+        opt.value = repo;
+        opt.textContent = repo;
+        select.appendChild(opt);
+      });
+      if (repos.includes(currentVal)) select.value = currentVal;
+      // 重新渲染表格（用当前最新语言）
+      renderTable();
+    }
+    window.applyLang = applyLang;
 
-      btn.textContent = '清理中...';
-      // 轮询清理结果
-      pollCleanupStatus(btn, originalText, parseFloat(r2MaxGbVal));
-      return;
+    async function logout(){ await fetch('/logout',{method:'POST'}); location.reload(); }
+
+    async function deleteBackup(fileName, btn){
+      if(!confirm(t('confirmDelete', {name: fileName}))) return;
+      btn.disabled = true; btn.textContent = t('deleting');
+      try {
+        const res = await fetch('/api/backup/delete?file=' + encodeURIComponent(fileName), { method:'DELETE' });
+        const result = await res.json();
+        if (result.success) { alert(t('deleteSuccess')); loadLogs(); }
+        else { alert(t('deleteFailed') + (result.message || t('unknownError'))); btn.disabled = false; btn.textContent = t('delete'); }
+      } catch(e) { alert(t('deleteFailed') + e.message); btn.disabled = false; btn.textContent = t('delete'); }
     }
 
-    // 没有需要删除的备份，直接保存设置
-    const saveRes = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        r2_max_gb: parseFloat(r2MaxGbVal),
-        backup_retain_count: newRetainCount,
-        backup_failed_retain_count: newFailedRetainCount
-      })
-    });
-    const saveResult = await saveRes.json();
-    if (saveResult.success) {
-      alert('设置已更新，无需清理旧备份');
-      loadLogs();
-    } else {
-      alert('保存失败：' + saveResult.message);
-    }
-  } catch(e) {
-    alert('操作失败：' + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = originalText;
-  }
-}
-
-async function pollCleanupStatus(btn, originalText, r2MaxGb) {
-  let attempts = 0;
-  const poll = async () => {
-    try {
-      attempts++;
-      if (attempts > 60) {
-        alert('清理任务超时，已等待3分钟，请稍后刷新日志查看结果');
-        btn.disabled = false;
-        btn.textContent = originalText;
-        loadLogs();
-        return;
-      }
-      const res = await fetch('/api/backup/cleanup-status');
-      const data = await res.json();
-      if (data.status === 'pending') {
-        btn.textContent = '清理中... (' + (attempts * 3) + 's)';
-        setTimeout(poll, 3000);
-      } else if (data.status === 'done') {
-        // 清理成功后保存所有设置
-        await fetch('/api/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            r2_max_gb: r2MaxGb,
-            backup_failed_retain_count: parseInt(document.getElementById('failedRetainCount').value, 10)
-          })
+    async function loadLogs(){
+      try {
+        const setRes = await fetch('/api/settings');
+        const setData = await setRes.json();
+        const isPaused = setData.settings && setData.settings.backup_paused === 'true';
+        document.getElementById('pauseWarning').style.display = isPaused ? 'flex' : 'none';
+        const res = await fetch('/api/logs');
+        if (res.status === 401) { location.reload(); return; }
+        const data = await res.json();
+        allLogs = data.logs || [];
+        const select = document.getElementById('repoFilter');
+        const currentVal = select.value;
+        const repos = [...new Set(allLogs.map(l => l.repo_name).filter(Boolean))].sort();
+        select.innerHTML = '<option value="">' + t('allRepos') + '</option>';
+        repos.forEach(repo => {
+          const opt = document.createElement('option');
+          opt.value = repo; opt.textContent = repo; select.appendChild(opt);
         });
-        alert('设置已保存：' + data.message);
-        btn.disabled = false;
-        btn.textContent = originalText;
-        loadLogs();
-      } else if (data.status === 'error') {
-        alert('清理失败：' + data.message);
-        btn.disabled = false;
-        btn.textContent = originalText;
-        loadLogs();
+        if (repos.includes(currentVal)) select.value = currentVal;
+        renderTable();
+      } catch(e) {
+        console.error(e);
+        document.querySelector('#logTable tbody').innerHTML = '<tr><td colspan="8">' + t('loadLogsFailed') + '</td></tr>';
       }
-    } catch (e) {
-      console.error('轮询清理状态失败', e);
-      setTimeout(poll, 3000);
     }
-  };
-  poll();
-}
 
-async function resumeBackups() {
-  if (!confirm("确认要恢复备份功能吗？请确保您已经调大了最大可用空间或清理了历史记录。")) return;
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backup_paused: 'false' })
-    });
-    const result = await res.json();
-    if (result.success) {
-      alert('已解除熔断，请刷新页面。');
-      location.reload();
-    } else {
-      alert('恢复失败：' + result.message);
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        if (res.status === 401) return;
+        const data = await res.json();
+        if (data.success) {
+          if (data.settings.r2_max_gb) document.getElementById('r2MaxGb').value = data.settings.r2_max_gb;
+          if (data.settings.backup_retain_count) document.getElementById('backupRetainCount').value = data.settings.backup_retain_count;
+          if (data.settings.backup_failed_retain_count !== undefined) document.getElementById('failedRetainCount').value = data.settings.backup_failed_retain_count;
+        }
+      } catch(e) { console.error(t('loadSettingsFailed'), e); }
     }
-  } catch (e) {
-    alert('请求失败：' + e.message);
-  }
-}
 
-async function triggerManualBackup() {
-  const repo = document.getElementById('manualRepo').value.trim();
-  const branch = document.getElementById('manualBranch').value.trim();
-  
-  if (!repo || !repo.includes('/')) {
-    alert('请输入正确的仓库格式，例如：ycscg-org/github-backup-worker');
-    return;
-  }
-
-  const btn = document.querySelector('button[onclick="triggerManualBackup()"]');
-  btn.disabled = true;
-  btn.textContent = '校验仓库...';
-
-  try {
-    const res = await fetch('/api/backup/trigger', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo, branch })
-    });
-    const result = await res.json();
-    if (result.success) {
-      btn.textContent = '备份中 (' + result.branch + ')...';
-      pollManualStatus(btn);
-    } else {
-      alert('提交失败：' + result.message);
-      btn.disabled = false;
-      btn.textContent = '开始备份';
+    async function saveSettings() {
+      const r2MaxGbVal = document.getElementById('r2MaxGb').value;
+      const retainCountVal = document.getElementById('backupRetainCount').value;
+      const failedRetainCountVal = document.getElementById('failedRetainCount').value;
+      const newRetainCount = parseInt(retainCountVal, 10);
+      const newFailedRetainCount = parseInt(failedRetainCountVal, 10);
+      if (!r2MaxGbVal || parseFloat(r2MaxGbVal) < 1) return alert(t('inputValidR2'));
+      if (!Number.isFinite(newRetainCount) || newRetainCount < 1) return alert(t('inputValidRetain'));
+      if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) return alert(t('inputValidFailedRetain'));
+      const btn = document.getElementById('saveSettingsBtn');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = t('saving');
+      try {
+        const countRes = await fetch('/api/backup/cleanup-count', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backup_retain_count: newRetainCount, backup_failed_retain_count: newFailedRetainCount })
+        });
+        const countData = await countRes.json();
+        if (!countData.success) throw new Error(countData.message || t('countCleanupFailed'));
+        const successDeleteCount = countData.successDeleteCount;
+        const failedDeleteCount = countData.failedDeleteCount;
+        const totalDeleteCount = countData.deleteCount;
+        if (totalDeleteCount > 0) {
+          let confirmMsg = t('cleanupConfirmTitle');
+          if (successDeleteCount > 0) confirmMsg += t('cleanupSuccessItem', {count: successDeleteCount});
+          if (failedDeleteCount > 0) {
+            if (newFailedRetainCount === 0) confirmMsg += t('cleanupFailedAllItem', {count: failedDeleteCount});
+            else confirmMsg += t('cleanupFailedItem', {count: failedDeleteCount});
+          }
+          confirmMsg += t('cleanupConfirmEnd', {count: totalDeleteCount});
+          if (!confirm(confirmMsg)) { btn.disabled = false; btn.textContent = originalText; return; }
+          const cleanupRes = await fetch('/api/backup/cleanup', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backup_retain_count: newRetainCount, backup_failed_retain_count: newFailedRetainCount })
+          });
+          const cleanupResult = await cleanupRes.json();
+          if (!cleanupResult.success) throw new Error(cleanupResult.message || t('submitCleanupFailed'));
+          btn.textContent = t('cleaningUp');
+          pollCleanupStatus(btn, originalText, parseFloat(r2MaxGbVal));
+          return;
+        }
+        const saveRes = await fetch('/api/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ r2_max_gb: parseFloat(r2MaxGbVal), backup_retain_count: newRetainCount, backup_failed_retain_count: newFailedRetainCount })
+        });
+        const saveResult = await saveRes.json();
+        if (saveResult.success) { alert(t('settingsSavedNoCleanup')); loadLogs(); }
+        else alert(t('saveFailed') + saveResult.message);
+      } catch(e) { alert(t('operationFailed') + e.message); }
+      finally { btn.disabled = false; btn.textContent = originalText; }
     }
-  } catch (e) {
-    alert('请求失败：' + e.message);
-    btn.disabled = false;
-    btn.textContent = '开始备份';
-  }
-}
 
-async function pollManualStatus(btn) {
-  let attempts = 0;
-  const poll = async () => {
-    try {
-      attempts++;
-      if (attempts > 60) {
-        alert('备份超时，已等待3分钟，请稍后刷新日志查看结果');
-        btn.disabled = false;
-        btn.textContent = '开始备份';
-        loadLogs();
-        return;
+    async function pollCleanupStatus(btn, originalText, r2MaxGb) {
+      let attempts = 0;
+      const poll = async () => {
+        try {
+          attempts++;
+          if (attempts > 60) {
+            alert(t('cleanupTimeout')); btn.disabled = false; btn.textContent = originalText; loadLogs(); return;
+          }
+          const res = await fetch('/api/backup/cleanup-status');
+          const data = await res.json();
+          if (data.status === 'pending') {
+            btn.textContent = t('cleaningUp') + ' (' + (attempts * 3) + 's)';
+            setTimeout(poll, 3000);
+          } else if (data.status === 'done') {
+            await fetch('/api/settings', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ r2_max_gb: r2MaxGb, backup_failed_retain_count: parseInt(document.getElementById('failedRetainCount').value, 10) })
+            });
+            alert(t('settingsSaved') + data.message);
+            btn.disabled = false; btn.textContent = originalText; loadLogs();
+          } else if (data.status === 'error') {
+            alert(t('cleanupFailed') + data.message);
+            btn.disabled = false; btn.textContent = originalText; loadLogs();
+          }
+        } catch (e) { console.error(t('cleanupTimeout'), e); setTimeout(poll, 3000); }
+      };
+      poll();
+    }
+
+    async function resumeBackups() {
+      if (!confirm(t('confirmResume'))) return;
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backup_paused: 'false' })
+        });
+        const result = await res.json();
+        if (result.success) { alert(t('resumeSuccess')); location.reload(); }
+        else alert(t('resumeFailed') + result.message);
+      } catch (e) { alert(t('requestFailed') + e.message); }
+    }
+
+    async function triggerManualBackup() {
+      const repo = document.getElementById('manualRepo').value.trim();
+      const branch = document.getElementById('manualBranch').value.trim();
+      if (!repo || !repo.includes('/')) { alert(t('inputValidRepo')); return; }
+      const btn = document.getElementById('startBackupBtn');
+      btn.disabled = true; btn.textContent = t('verifyingRepo');
+      try {
+        const res = await fetch('/api/backup/trigger', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, branch })
+        });
+        const result = await res.json();
+        if (result.success) {
+          btn.textContent = t('backingUp') + ' (' + result.branch + ')...';
+          pollManualStatus(btn);
+        } else {
+          alert(t('submitFailed') + result.message);
+          btn.disabled = false; btn.textContent = t('startBackup');
+        }
+      } catch (e) {
+        alert(t('requestFailed') + e.message);
+        btn.disabled = false; btn.textContent = t('startBackup');
       }
-      const res = await fetch('/api/backup/trigger-status');
-      const data = await res.json();
-      if (data.status === 'pending') {
-        setTimeout(poll, 3000);
-      } else if (data.status === 'done') {
-        alert('备份成功！\\n仓库：' + data.repo + '\\n分支：' + data.branch + '\\n文件大小：' + formatSize(data.fileSize));
-        document.getElementById('manualRepo').value = '';
-        document.getElementById('manualBranch').value = '';
-        btn.disabled = false;
-        btn.textContent = '开始备份';
-        loadLogs();
-      } else if (data.status === 'error') {
-        alert('备份失败：' + data.message);
-        btn.disabled = false;
-        btn.textContent = '开始备份';
-        loadLogs();
-      }
-    } catch (e) {
-      console.error('轮询备份状态失败', e);
-      setTimeout(poll, 3000);
     }
-  };
-  setTimeout(poll, 2000);
-}
 
-let isPolling = false; 
-
-async function syncOrganization() {
-  const org = document.getElementById('syncOrgName').value.trim();
-  const limit = document.getElementById('syncLimit').value || 10;
-  
-  if (!org) {
-    alert('请输入 GitHub 组织名称');
-    return;
-  }
-
-  if (!confirm('确定要触发组织 "' + org + '" 的全量备份吗？将自动补齐未备份的仓库（本次最多处理 ' + limit + ' 个）。')) {
-    return;
-  }
-
-  const btn = document.querySelector('button[onclick="syncOrganization()"]');
-  const originalText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '后台执行中 (请稍候)...';
-  btn.setAttribute('data-poll-attempts', '0');
-  isPolling = false;
-
-  try {
-    const res = await fetch('/api/backup/sync-org', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org, limit: parseInt(limit, 10) })
-    });
-    const result = await res.json();
-    
-    if (result.success) {
-      if (!isPolling) {
-        isPolling = true;
-        pollSyncStatus(btn, originalText);
-      }
-    } else {
-      alert('提交失败：' + result.message);
-      btn.disabled = false;
-      btn.textContent = originalText;
-      loadLogs();
+    async function pollManualStatus(btn) {
+      let attempts = 0;
+      const poll = async () => {
+        try {
+          attempts++;
+          if (attempts > 60) {
+            alert(t('backupTimeout')); btn.disabled = false; btn.textContent = t('startBackup'); loadLogs(); return;
+          }
+          const res = await fetch('/api/backup/trigger-status');
+          const data = await res.json();
+          if (data.status === 'pending') setTimeout(poll, 3000);
+          else if (data.status === 'done') {
+            alert(t('backupSuccess', {repo: data.repo, branch: data.branch, size: formatSize(data.fileSize)}));
+            document.getElementById('manualRepo').value = '';
+            document.getElementById('manualBranch').value = '';
+            btn.disabled = false; btn.textContent = t('startBackup'); loadLogs();
+          } else if (data.status === 'error') {
+            alert(t('backupFailed') + data.message);
+            btn.disabled = false; btn.textContent = t('startBackup'); loadLogs();
+          }
+        } catch (e) { console.error(t('backupTimeout'), e); setTimeout(poll, 3000); }
+      };
+      setTimeout(poll, 2000);
     }
-  } catch (e) {
-    alert('请求失败：' + e.message);
-    btn.disabled = false;
-    btn.textContent = originalText;
+
+    async function syncOrganization() {
+      const org = document.getElementById('syncOrgName').value.trim();
+      const limit = document.getElementById('syncLimit').value || 10;
+      if (!org) { alert(t('inputOrgName')); return; }
+      if (!confirm(t('confirmFullBackup', {org: org, limit: limit}))) return;
+      const btn = document.getElementById('startFullBackupBtn');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = t('runningInBackground');
+      btn.setAttribute('data-poll-attempts', '0');
+      isPolling = false;
+      try {
+        const res = await fetch('/api/backup/sync-org', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ org, limit: parseInt(limit, 10) })
+        });
+        const result = await res.json();
+        if (result.success) {
+          if (!isPolling) { isPolling = true; pollSyncStatus(btn, originalText); }
+        } else {
+          alert(t('submitFailed') + result.message);
+          btn.disabled = false; btn.textContent = originalText; loadLogs();
+        }
+      } catch (e) {
+        alert(t('requestFailed') + e.message);
+        btn.disabled = false; btn.textContent = originalText; loadLogs();
+      }
+    }
+
+    async function pollSyncStatus(btn, originalText) {
+      try {
+        const res = await fetch('/api/backup/sync-status');
+        const data = await res.json();
+        if (data.status === 'pending') {
+          const attempts = parseInt(btn.getAttribute('data-poll-attempts') || '0', 10);
+          if (attempts >= 60) {
+            isPolling = false; btn.disabled = false; btn.textContent = originalText;
+            alert(t('fullBackupTimeout')); loadLogs(); return;
+          }
+          btn.setAttribute('data-poll-attempts', attempts + 1);
+          setTimeout(() => pollSyncStatus(btn, originalText), 3000);
+        } else if (data.status === 'done') {
+          isPolling = false; btn.disabled = false; btn.textContent = originalText;
+          alert(t('fullBackupComplete', {success: data.successCount, failed: data.failedCount, skipped: data.skipped}));
+          loadLogs();
+        } else if (data.status === 'error') {
+          isPolling = false; btn.disabled = false; btn.textContent = originalText;
+          alert(t('fullBackupFailed') + data.message); loadLogs();
+        }
+      } catch (e) { console.error(t('fullBackupTimeout'), e); setTimeout(() => pollSyncStatus(btn, originalText), 3000); }
+    }
+
+    function renderTable(){
+      const tbody = document.querySelector('#logTable tbody');
+      tbody.innerHTML = '';
+      const selectedRepo = document.getElementById('repoFilter').value;
+      const filteredLogs = selectedRepo ? allLogs.filter(l => l.repo_name === selectedRepo) : allLogs;
+      if (filteredLogs.length === 0) { tbody.innerHTML = '<tr><td colspan="8">' + t('noRecords') + '</td></tr>'; return; }
+      filteredLogs.forEach(log => {
+        const tr = document.createElement('tr');
+        const isSuccess = log.status === 'done' || log.status === 'success';
+        let statusText = isSuccess ? t('success') : ((log.status === 'error' || log.status === 'failed') ? t('failed') : t('unknownStatus'));
+        const lang = getLang();
+        const dateStr = log.created_at ? new Date(log.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US') : '-';
+        const cells = [
+          dateStr, log.repo_name || '-', log.branch || '-', log.file_name || '-',
+          formatSize(log.file_size), statusText, log.error_msg || '-'
+        ];
+        cells.forEach((v,i) => {
+          const td = document.createElement('td');
+          td.textContent = v;
+          if (i === 5) td.className = isSuccess ? 'status-success' : 'status-failed';
+          tr.appendChild(td);
+        });
+        const tdAction = document.createElement('td');
+        if (log.file_name) {
+          if (isSuccess) {
+            const a = document.createElement('a');
+            a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
+            a.className = 'btn btn-download'; a.textContent = t('download');
+            tdAction.appendChild(a);
+          }
+          const b = document.createElement('button');
+          b.className = 'btn btn-delete'; b.textContent = t('delete');
+          b.onclick = () => deleteBackup(log.file_name, b);
+          tdAction.appendChild(b);
+        } else tdAction.textContent = '-';
+        tr.appendChild(tdAction);
+        tbody.appendChild(tr);
+      });
+    }
+
+    applyLang();
+    loadSettings();
     loadLogs();
-  }
-}
-
-async function pollSyncStatus(btn, originalText) {
-  try {
-    const res = await fetch('/api/backup/sync-status');
-    const data = await res.json();
-
-    if (data.status === 'pending') {
-      const attempts = parseInt(btn.getAttribute('data-poll-attempts') || '0', 10);
-      if (attempts >= 60) {
-        isPolling = false;
-        btn.disabled = false;
-        btn.textContent = originalText;
-        alert('后台任务超时，可能因仓库过大导致 Worker 执行超时被中断。请稍后刷新日志查看。');
-        loadLogs();
-        return;
-      }
-      btn.setAttribute('data-poll-attempts', attempts + 1);
-      setTimeout(() => pollSyncStatus(btn, originalText), 3000);
-    } else if (data.status === 'done') {
-      isPolling = false;
-      btn.disabled = false;
-      btn.textContent = originalText;
-      alert('备份完成！\\n成功：' + data.successCount + ' 个\\n失败：' + data.failedCount + ' 个\\n跳过：' + data.skipped + ' 个');
-      loadLogs();
-    } else if (data.status === 'error') {
-      isPolling = false;
-      btn.disabled = false;
-      btn.textContent = originalText;
-      alert('备份任务失败：' + data.message);
-      loadLogs();
-    }
-  } catch (e) {
-    console.error("轮询状态失败", e);
-    setTimeout(() => pollSyncStatus(btn, originalText), 3000);
-  }
-}
-
-function renderTable(){
-  const tbody = document.querySelector('#logTable tbody');
-  tbody.innerHTML = '';
-
-  const selectedRepo = document.getElementById('repoFilter').value;
-  const filteredLogs = selectedRepo
-  ? allLogs.filter(l => l.repo_name === selectedRepo)
-  : allLogs;
-
-  if (filteredLogs.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8">暂无备份记录</td></tr>';
-    return;
-  }
-
-  filteredLogs.forEach(log => {
-    const tr = document.createElement('tr');
-    // 兼容新旧两种状态值：旧版是success/failed，新版是done/error
-    const isSuccess = log.status === 'done' || log.status === 'success';
-    const canOperate = isSuccess && log.file_name;
-    const statusText = isSuccess ? '成功' : (log.status === 'error' || log.status === 'failed') ? '失败' : '未知';
-    const cells = [
-      log.created_at ? new Date(log.created_at).toLocaleString('zh-CN') : '-',
-      log.repo_name || '-',
-      log.branch || '-',
-      log.file_name || '-',
-      formatSize(log.file_size),
-      statusText,
-      log.error_msg || '-'
-    ];
-    cells.forEach((v,i) => {
-      const td = document.createElement('td');
-      td.textContent = v;
-      if (i === 5) td.className = isSuccess ? 'status-success' : 'status-failed';
-      tr.appendChild(td);
-    });
-    const tdAction = document.createElement('td');
-    if (log.file_name) {
-      if (isSuccess) {
-        const a = document.createElement('a');
-        a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
-        a.className = 'btn btn-download'; a.textContent = '下载';
-        tdAction.appendChild(a);
-      }
-      const b = document.createElement('button');
-      b.className = 'btn btn-delete'; b.textContent = '删除';
-      b.onclick = () => deleteBackup(log.file_name, b);
-      tdAction.appendChild(b);
-    } else {
-      tdAction.textContent = '-';
-    }
-    tr.appendChild(tdAction);
-    tbody.appendChild(tr);
-  });
-}
-loadSettings();
-loadLogs();
 <\/script>
 </body></html>`;
 }
@@ -1465,7 +1460,7 @@ async function handleGetLogs(request, env) {
 }
 // 获取设置
 async function handleGetSettings(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  if (!isAuthed(request, env)) return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   try {
     const { results } = await env.DB.prepare("SELECT key, value FROM settings").all();
     const settings = {};
@@ -1487,7 +1482,7 @@ async function handleGetSettings(request, env) {
 
 // 保存设置
 async function handleSaveSettings(request, env) {
-  if (!isAuthed(request, env)) return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  if (!isAuthed(request, env)) return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   try {
     const body = await parseJson(request);
     
@@ -1521,7 +1516,7 @@ async function handleSaveSettings(request, env) {
       }
     }
     
-    return Response.json({ success: true, message: "设置已保存" });
+    return Response.json({ success: true, errorCode: "errSettingsSaved" });
   } catch (e) {
     return Response.json({ success: false, message: e.message }, { status: 500 });
   }
@@ -1562,25 +1557,25 @@ async function handleDownloadBackup(request, env) {
 // ---------- API：删除 ----------
 async function handleDeleteBackup(request, env) {
   if (!isAuthed(request, env)) {
-    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+    return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   }
   const url = new URL(request.url);
   const fileName = url.searchParams.get("file");
-  if (!fileName) return Response.json({ success: false, message: "缺少文件参数" }, { status: 400 });
-  if (!isValidBackupFileName(fileName)) return Response.json({ success: false, message: "非法文件名" }, { status: 400 });
-  if (!env.DB) return Response.json({ success: false, message: "D1 DB not configured" }, { status: 500 });
+  if (!fileName) return Response.json({ success: false, errorCode: "errMissingFileParam" }, { status: 400 });
+  if (!isValidBackupFileName(fileName)) return Response.json({ success: false, errorCode: "errInvalidFileName" }, { status: 400 });
+  if (!env.DB) return Response.json({ success: false, errorCode: "errDbNotConfigured" }, { status: 500 });
 
   const row = await env.DB.prepare(
     "SELECT id, status FROM backups WHERE file_name = ? LIMIT 1"
   ).bind(fileName).first();
-  if (!row) return Response.json({ success: false, message: "记录不存在" }, { status: 404 });
+  if (!row) return Response.json({ success: false, errorCode: "errRecordNotFound" }, { status: 404 });
 
   try {
     if (row.status === 'done' || row.status === 'success') {
       await env.BUCKET.delete(fileName);
     }
     await env.DB.prepare("DELETE FROM backups WHERE file_name = ?").bind(fileName).run();
-    return Response.json({ success: true, message: "删除成功" });
+    return Response.json({ success: true, errorCode: "errDeleteSuccess" });
   } catch (e) {
     console.error("Delete backup error:", e);
     return Response.json({ success: false, message: e.message }, { status: 500 });

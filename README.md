@@ -1,6 +1,8 @@
 # GitHub Backup Worker
 
-一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，备份与失败记录的保留数量也可在面板中调整，并带实时进度反馈和 R2 空间熔断保护。
+[English](./README.en.md) | **简体中文**
+
+一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，备份与失败记录的保留数量也可在面板中调整，并带实时进度反馈和 R2 空间熔断保护。管理面板支持中英文实时切换。
 
 ## 架构
 
@@ -21,20 +23,25 @@
 - ✅ 批量清理旧备份：调低保留数量保存时，自动统计超量备份并弹窗确认，随后在后台批量删除，完成或失败均弹窗反馈
 - ✅ 失败记录保留策略：每个（仓库、分支）保留最近 M 条失败记录，M 可在管理面板调整（默认 10），设为 0 即清空全部历史失败日志
 - ✅ R2 空间熔断保护：占用超过设定上限时先自动清理冗余旧备份（每个仓库仅保留最新一条），仍不足则暂停全部备份
+- ✅ 内置管理面板支持中英文实时切换（登录页与管理页均可切换，语言选择保存在浏览器本地）
 - ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 写入 1000 次/天 / Worker 10 万请求/天）
 
 ## 项目结构
 
 ```text
 github-backup-worker/
-├── wrangler.toml      # Wrangler 配置（D1/R2/KV 绑定、自定义域名路由）
-├── init.sql           # D1 初始化脚本（backups 表、settings 表及索引）
+├── wrangler.toml         # Wrangler 配置（D1/R2/KV 绑定、自定义域名路由）
+├── init.sql              # D1 初始化脚本（backups 表、settings 表及索引）
 ├── src/
-│   └── index.js       # Worker 核心逻辑（路由、备份、管理面板、API）
-├── .env.example       # 本地开发环境变量示例
+│   ├── index.js          # Worker 核心逻辑（路由、备份、管理面板、API）
+│   └── i18n.js           # 界面双语字典（中文 / English）
+├── .env.example          # 本地开发环境变量示例
 ├── .gitignore
-├── LICENSE            # MIT
-└── README.md
+├── LICENSE               # MIT
+├── RESOURCE-LIMITS.md    # 免费额度消耗测算与 WAF 加固建议（中文）
+├── RESOURCE-LIMITS.en.md # 同上（English）
+├── README.md             # 中文说明（本文件）
+└── README.en.md          # 英文说明
 ```
 
 ## 前置条件
@@ -253,6 +260,17 @@ npx wrangler deploy
 - 按仓库名称下拉筛选，避免看错
 - 成功记录可「下载」（`.tar.gz`）或「删除」；删除会同时清除 R2 文件与 D1 记录，失败记录也支持手动清理
 
+**界面语言**
+
+- 登录页与管理页右上角均有「中文 / EN」切换按钮，点击即时切换整个界面，无需刷新或重新登录
+- 语言选择保存在浏览器本地（`localStorage` 键 `backup_manager_lang`），下次打开自动沿用；首次访问默认为中文
+
+## 添加新语言
+
+- 所有界面文案集中在 `src/i18n.js` 的 `dict` 对象中，`zh` 与 `en` 分别对应中文和英文
+- 新增一种语言只需在 `dict` 中增加一个语言键（例如 `ja`），参照 `en` 的结构逐条翻译
+- 然后在登录页与管理页的语言按钮区各补一个按钮（调用 `setLang('ja')`），并在 `getSupportedLangs()` 中注册显示名
+
 ## 环境变量
 
 本项目只需三个 Secret，均通过 `wrangler secret put` 设置（见下方第 6 步），无需在 `wrangler.toml` 中配置任何 Var。
@@ -280,6 +298,10 @@ npx wrangler dev
 - 无定时全量备份（仅 Webhook 触发；如需定时，需自行实现 `scheduled` 处理器）
 - Worker 单次请求有 CPU 时长上限，超大仓库可能超时
 - 备份是 GitHub 提供的 tarball 快照，非完整 Git 仓库（无 `.git` 历史）
+
+## 免费额度与安全加固
+
+部署后各操作的 Cloudflare 免费额度消耗测算、各项额度触顶门槛，以及防止额度被滥用的 WAF 速率限制建议，详见 [资源消耗测算与安全加固](RESOURCE-LIMITS.md)。
 
 ## License
 

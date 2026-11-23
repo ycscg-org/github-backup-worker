@@ -1,13 +1,13 @@
 # GitHub Backup Worker
 
-一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，备份保留数量也可在面板中调整，并带实时进度反馈和 R2 空间熔断保护。
+一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，备份与失败记录的保留数量也可在面板中调整，并带实时进度反馈和 R2 空间熔断保护。
 
 ## 架构
 
 - **GitHub Webhook**：仓库 push 时触发，HMAC-SHA256 签名校验
 - **Cloudflare Worker**：接收 Webhook、拉取 tarball、写 R2/D1、托管管理页
 - **R2**：存储 `.tar.gz` 备份文件
-- **D1**：`backups` 表存备份记录，`settings` 表存面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`）
+- **D1**：`backups` 表存备份记录，`settings` 表存面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`、`backup_failed_retain_count`）
 - **KV**：暂存单库备份（`manual_backup_result`）、全量备份（`sync_result`）与批量清理（`cleanup_result`）的进度和结果
 
 ## 功能
@@ -19,6 +19,7 @@
 - ✅ 全量备份组织：对比 `pushed_at` 自动跳过无更新的仓库，单次处理数量可调，完成后弹窗汇总成功 / 失败 / 跳过数量
 - ✅ 备份保留策略：每个（仓库、分支）保留最近 N 条成功备份，N 可在管理面板调整（默认 5）
 - ✅ 批量清理旧备份：调低保留数量保存时，自动统计超量备份并弹窗确认，随后在后台批量删除，完成或失败均弹窗反馈
+- ✅ 失败记录保留策略：每个（仓库、分支）保留最近 M 条失败记录，M 可在管理面板调整（默认 10），设为 0 即清空全部历史失败日志
 - ✅ R2 空间熔断保护：占用超过设定上限时先自动清理冗余旧备份（每个仓库仅保留最新一条），仍不足则暂停全部备份
 - ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 写入 1000 次/天 / Worker 10 万请求/天）
 
@@ -135,7 +136,7 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 `init.sql` 建两张表：
 
 - `backups`：备份记录（`repo_name`、`branch`、`file_name`、`file_size`、`status`、`error_msg`、`created_at`）及其索引
-- `settings`：面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`）
+- `settings`：面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`、`backup_failed_retain_count`）
 
 ### 6. 设置 Secret
 
@@ -242,8 +243,9 @@ npx wrangler deploy
 
 **系统设置**
 
-- 「R2 最大可用空间」：设定可用于备份的空间上限（GB）。若多个 Worker 共用同一个 R2 桶，请扣除其他项目占用的空间
+- 「R2 最大可用空间」：设定可用于备份的空间上限（GB），默认 8。若多个 Worker 共用同一个 R2 桶，请扣除其他项目占用的空间
 - 「每个仓库/分支最多保留备份」：设定每个（仓库、分支）保留的成功备份条数，默认 5，范围 1–100。调低数值保存时，会先统计并弹窗提示将要删除的旧备份数量，确认后由后台批量删除超量备份（同时删除 R2 文件与 D1 记录），完成或中途失败都会弹窗反馈结果
+- 「失败记录最多保留」：设定每个（仓库、分支）保留的失败记录条数，默认 10，范围 0–10000。调低数值同样会先弹窗确认、再由后台批量删除超量失败记录（失败记录没有 R2 文件，只删 D1 记录）；设为 0 保存后会清空全部历史失败记录，相当于一键清理失败日志
 - 空间不足触发熔断时，页面顶部出现红色横幅，清理旧备份腾出空间后点击「恢复备份」即可解除
 
 **日志列表**
@@ -261,7 +263,7 @@ npx wrangler deploy
 | `WEBHOOK_SECRET` | Secret | Webhook HMAC 校验密钥 |
 | `ADMIN_PASSWORD` | Secret | 管理面板密码 |
 
-> 提示：备份保留数量已改由管理面板「系统设置」中配置，保存在 D1 的 `settings` 表（键 `backup_retain_count`），默认 5。`src/index.js` 顶部的 `BACKUP_RETAIN_COUNT_DEFAULT = 5` 仅作为未设置时的默认值，无需再改代码。失败记录不参与自动清理。
+> 提示：成功与失败的保留数量均已改由管理面板「系统设置」中配置，保存在 D1 的 `settings` 表（键 `backup_retain_count`、`backup_failed_retain_count`），默认分别为 5 和 10。`src/index.js` 顶部的 `BACKUP_RETAIN_COUNT_DEFAULT`、`BACKUP_FAILED_RETAIN_COUNT_DEFAULT` 仅作为未设置时的默认值，无需再改代码。
 
 ## 本地开发
 

@@ -1,4 +1,5 @@
-var BACKUP_RETAIN_COUNT = 5;
+var BACKUP_RETAIN_COUNT_DEFAULT = 5;
+var BACKUP_FAILED_RETAIN_COUNT_DEFAULT = 10; // 失败记录默认保留10条
 
 // ---------- 工具 ----------
 function timingSafeEqual(a, b) {
@@ -11,6 +12,32 @@ function timingSafeEqual(a, b) {
     diff |= (ab[i] || 0) ^ (bb[i] || 0);
   }
   return diff === 0;
+}
+
+async function getRetainCount(env) {
+  try {
+    const setting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_retain_count'").first();
+    if (setting && setting.value) {
+      const val = parseInt(setting.value, 10);
+      if (Number.isFinite(val) && val >= 1) return val;
+    }
+  } catch (e) {
+    console.warn("读取保留数量设置失败，使用默认值:", e);
+  }
+  return BACKUP_RETAIN_COUNT_DEFAULT;
+}
+
+async function getFailedRetainCount(env) {
+  try {
+    const setting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_failed_retain_count'").first();
+    if (setting && setting.value !== undefined) {
+      const val = parseInt(setting.value, 10);
+      if (Number.isFinite(val) && val >= 0) return val;
+    }
+  } catch (e) {
+    console.warn("读取失败记录保留数量设置失败，使用默认值:", e);
+  }
+  return BACKUP_FAILED_RETAIN_COUNT_DEFAULT;
 }
 
 function getSessionToken(request) {
@@ -81,6 +108,15 @@ var index_default = {
     if (pathname === "/api/backup/sync-status" && request.method === "GET") {
       return await handleSyncStatus(request, env);
     }
+    if (pathname === "/api/backup/cleanup-count" && request.method === "POST") {
+      return await handleCountCleanup(request, env);
+    }
+    if (pathname === "/api/backup/cleanup" && request.method === "POST") {
+      return await handleCleanupBackups(request, env, ctx);
+    }
+    if (pathname === "/api/backup/cleanup-status" && request.method === "GET") {
+      return await handleCleanupStatus(request, env);
+    }
     if (pathname === "/api/settings" && request.method === "GET") {
       return await handleGetSettings(request, env);
     }
@@ -102,13 +138,14 @@ async function handleLogin(request, env) {
     return new Response(JSON.stringify({ success: false, message: "密码错误" }),
       { status: 401, headers: { "Content-Type": "application/json" } });
   }
-  return new Response(JSON.stringify({ success: true }), {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      "Set-Cookie": sessionCookie(env.ADMIN_PASSWORD)
-    }
-  });
+  return new Response(JSON.stringify({ success: true }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Set-Cookie": sessionCookie(env.ADMIN_PASSWORD)
+      }
+    });
 }
 
 // ---------- Webhook ----------
@@ -405,15 +442,233 @@ async function performOrgSync(env, orgName, limit) {
   }
 }
 
-// ---------- 旧备份清理 ----------
+// ---------- 备份清理任务状态查询 ----------
+async function handleCleanupStatus(request, env) {
+  if (!isAuthed(request, env)) return Response.json({ status: 'error', message: "未授权访问" }, { status: 401 });
+  if (!env.KV) return Response.json({ status: 'error', message: "KV 未绑定，无法查询清理进度" }, { status: 500 });
+  
+  const result = await env.KV.get('cleanup_result');
+  if (!result) return Response.json({ status: 'pending' });
+  
+  await env.KV.delete('cleanup_result');
+  return Response.json(JSON.parse(result));
+}
+
+// ---------- 统计待清理备份数量 ----------
+async function handleCountCleanup(request, env) {
+  if (!isAuthed(request, env)) {
+    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  }
+  try {
+    const body = await parseJson(request);
+    const newRetainCount = parseInt(body.backup_retain_count, 10);
+    const newFailedRetainCount = parseInt(body.backup_failed_retain_count, 10);
+    
+    if (!Number.isFinite(newRetainCount) || newRetainCount < 1) {
+      return Response.json({ success: false, message: "成功备份保留数量必须是大于等于1的正整数" }, { status: 400 });
+    }
+    if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) {
+      return Response.json({ success: false, message: "失败记录保留数量必须是大于等于0的整数" }, { status: 400 });
+    }
+
+    // 查询超出保留数量的成功备份总数
+    const { results: successToDelete } = await env.DB.prepare(`
+      WITH RankedBackups AS (
+        SELECT id, file_name,
+               ROW_NUMBER() OVER (PARTITION BY repo_name, branch ORDER BY created_at DESC) as rn
+        FROM backups
+        WHERE status IN ('done','success')
+      )
+      SELECT COUNT(*) as count FROM RankedBackups WHERE rn > ?
+    `).bind(newRetainCount).all();
+
+    // 查询超出保留数量的失败记录总数
+    let failedDeleteCount = 0;
+    if (newFailedRetainCount === 0) {
+      // 设为0时删除所有失败记录
+      const { results: failedCount } = await env.DB.prepare(`
+        SELECT COUNT(*) as count FROM backups WHERE status IN ('error','failed')
+      `).all();
+      failedDeleteCount = failedCount[0]?.count || 0;
+    } else {
+      // 按仓库和分支分组，超出数量的删除
+      const { results: failedToDelete } = await env.DB.prepare(`
+        WITH RankedFailed AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY repo_name, branch ORDER BY created_at DESC) as rn
+          FROM backups
+          WHERE status IN ('error','failed')
+        )
+        SELECT COUNT(*) as count FROM RankedFailed WHERE rn > ?
+      `).bind(newFailedRetainCount).all();
+      failedDeleteCount = failedToDelete[0]?.count || 0;
+    }
+
+    const successDeleteCount = successToDelete[0]?.count || 0;
+    const totalDeleteCount = successDeleteCount + failedDeleteCount;
+    return Response.json({ 
+      success: true, 
+      successDeleteCount,
+      failedDeleteCount,
+      deleteCount: totalDeleteCount,
+      willCleanup: totalDeleteCount > 0
+    });
+  } catch (e) {
+    console.error("统计待清理备份失败:", e);
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
+
+// ---------- 执行批量清理旧备份 ----------
+async function handleCleanupBackups(request, env, ctx) {
+  if (!isAuthed(request, env)) {
+    return Response.json({ success: false, message: "未授权访问" }, { status: 401 });
+  }
+  try {
+    const body = await parseJson(request);
+    const newRetainCount = parseInt(body.backup_retain_count, 10);
+    const newFailedRetainCount = parseInt(body.backup_failed_retain_count, 10);
+    
+    if (!Number.isFinite(newRetainCount) || newRetainCount < 1) {
+      return Response.json({ success: false, message: "成功备份保留数量必须是大于等于1的正整数" }, { status: 400 });
+    }
+    if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) {
+      return Response.json({ success: false, message: "失败记录保留数量必须是大于等于0的整数" }, { status: 400 });
+    }
+
+    // 先写入pending状态
+    if (env.KV) {
+      await env.KV.delete('cleanup_result');
+      await env.KV.put('cleanup_result', JSON.stringify({ status: 'pending' }), { expirationTtl: 600 });
+    }
+
+    // 异步执行清理任务
+    ctx.waitUntil(performCleanupBackups(env, newRetainCount, newFailedRetainCount));
+    
+    return Response.json({ 
+      success: true, 
+      message: "清理任务已提交，正在后台执行",
+      kv: !!env.KV
+    });
+  } catch (e) {
+    console.error("提交清理任务失败:", e);
+    return Response.json({ success: false, message: e.message }, { status: 500 });
+  }
+}
+
+async function performCleanupBackups(env, retainCount, failedRetainCount) {
+  let deletedSuccessCount = 0;
+  let deletedFailedCount = 0;
+  let failedCount = 0;
+  let errorMsg = "";
+  try {
+    // 先保存新的保留数量到设置
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_retain_count', ?)"
+    ).bind(retainCount.toString()).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_failed_retain_count', ?)"
+    ).bind(failedRetainCount.toString()).run();
+
+    // ========== 清理成功备份 ==========
+    const { results: successToDelete } = await env.DB.prepare(`
+      WITH RankedBackups AS (
+        SELECT id, file_name, file_size,
+               ROW_NUMBER() OVER (PARTITION BY repo_name, branch ORDER BY created_at DESC) as rn
+        FROM backups
+        WHERE status IN ('done','success')
+      )
+      SELECT id, file_name FROM RankedBackups WHERE rn > ? ORDER BY rn ASC
+    `).bind(retainCount).all();
+
+    const totalSuccessToDelete = successToDelete.length;
+    for (const backup of successToDelete) {
+      try {
+        await env.BUCKET.delete(backup.file_name);
+        await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(backup.id).run();
+        deletedSuccessCount++;
+      } catch (e) {
+        console.error(`[批量清理] 删除成功备份失败: ${backup.file_name}`, e);
+        failedCount++;
+      }
+    }
+
+    // ========== 清理失败记录 ==========
+    let failedToDelete = [];
+    if (failedRetainCount === 0) {
+      // 设为0删除所有失败记录（失败记录没有R2文件，只删数据库行）
+      const { results } = await env.DB.prepare(`
+        SELECT id FROM backups WHERE status IN ('error','failed') ORDER BY created_at ASC
+      `).all();
+      failedToDelete = results;
+    } else {
+      // 按保留数量删除超出的失败记录
+      const { results } = await env.DB.prepare(`
+        WITH RankedFailed AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY repo_name, branch ORDER BY created_at DESC) as rn
+          FROM backups
+          WHERE status IN ('error','failed')
+        )
+        SELECT id FROM RankedFailed WHERE rn > ? ORDER BY rn ASC
+      `).bind(failedRetainCount).all();
+      failedToDelete = results;
+    }
+
+    const totalFailedToDelete = failedToDelete.length;
+    for (const record of failedToDelete) {
+      try {
+        await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(record.id).run();
+        deletedFailedCount++;
+      } catch (e) {
+        console.error(`[批量清理] 删除失败记录失败，id: ${record.id}`, e);
+        failedCount++;
+      }
+    }
+
+    const totalDeleted = deletedSuccessCount + deletedFailedCount;
+    let resultMsg = `清理完成：成功删除 ${totalDeleted} 条记录`;
+    const details = [];
+    if (deletedSuccessCount > 0) details.push(`成功备份 ${deletedSuccessCount} 个`);
+    if (deletedFailedCount > 0) details.push(`失败记录 ${deletedFailedCount} 条`);
+    if (details.length > 0) resultMsg += `（${details.join('，')}）`;
+    if (failedCount > 0) resultMsg += `，${failedCount} 条删除失败`;
+
+    const result = {
+      status: 'done',
+      deletedCount: totalDeleted,
+      deletedSuccessCount,
+      deletedFailedCount,
+      failedCount,
+      message: resultMsg
+    };
+
+    if (env.KV) {
+      await env.KV.put('cleanup_result', JSON.stringify(result), { expirationTtl: 300 });
+    }
+    console.log(resultMsg);
+  } catch (e) {
+    console.error("批量清理备份失败:", e);
+    errorMsg = e.message;
+    if (env.KV) {
+      await env.KV.put('cleanup_result', JSON.stringify({
+        status: 'error',
+        message: `清理失败：${errorMsg}，已成功删除 ${deletedSuccessCount + deletedFailedCount} 条记录`
+      }), { expirationTtl: 300 });
+    }
+  }
+}
+
+// ---------- 旧备份清理（单库备份完成后自动执行） ----------
 async function cleanupOldBackups(env, repoFullName, branch) {
   try {
+    const retainCount = await getRetainCount(env);
     const { results: oldBackups } = await env.DB.prepare(`
       SELECT id, file_name FROM backups 
       WHERE repo_name = ? AND branch = ? AND status IN ('done','success')
       ORDER BY created_at DESC
       LIMIT -1 OFFSET ?
-    `).bind(repoFullName, branch, BACKUP_RETAIN_COUNT).all();
+    `).bind(repoFullName, branch, retainCount).all();
     
     for (const backup of oldBackups) {
       try {
@@ -422,6 +677,37 @@ async function cleanupOldBackups(env, repoFullName, branch) {
         console.log(`[清理旧备份] 已删除超出保留数量的旧备份: ${backup.file_name}`);
       } catch (e) {
         console.error(`[清理旧备份] 删除失败: ${backup.file_name}`, e);
+      }
+    }
+
+    // 同时清理超出数量的失败记录
+    const failedRetainCount = await getFailedRetainCount(env);
+    let failedRecordsToDelete = [];
+    if (failedRetainCount === 0) {
+      // 保留0条时删除当前仓库该分支的所有失败记录
+      const { results } = await env.DB.prepare(`
+        SELECT id FROM backups 
+        WHERE repo_name = ? AND branch = ? AND status IN ('error','failed')
+        ORDER BY created_at ASC
+      `).bind(repoFullName, branch).all();
+      failedRecordsToDelete = results;
+    } else {
+      // 保留指定数量，删除超出的
+      const { results } = await env.DB.prepare(`
+        SELECT id FROM backups 
+        WHERE repo_name = ? AND branch = ? AND status IN ('error','failed')
+        ORDER BY created_at DESC
+        LIMIT -1 OFFSET ?
+      `).bind(repoFullName, branch, failedRetainCount).all();
+      failedRecordsToDelete = results;
+    }
+    
+    for (const record of failedRecordsToDelete) {
+      try {
+        await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(record.id).run();
+        console.log(`[清理失败记录] 已删除超出保留数量的失败记录，id: ${record.id}`);
+      } catch (e) {
+        console.error(`[清理失败记录] 删除失败，id: ${record.id}`, e);
       }
     }
   } catch (e) {
@@ -501,9 +787,8 @@ async function performBackup(env, owner, repoName, branch, cloneUrl) {
         await env.DB.prepare(
           "INSERT INTO backups (repo_name, branch, file_name, file_size, status, error_msg, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         ).bind(repoFullName, branch, fileName, fileSize, status, errorMsg, new Date().toISOString()).run();
-        if (status === 'done') {
-          await cleanupOldBackups(env, repoFullName, branch);
-        }
+        // 无论成功还是失败，都执行清理（成功备份清理旧成功备份，失败记录清理旧失败记录）
+        await cleanupOldBackups(env, repoFullName, branch);
       } else {
         console.warn("D1 DB binding is missing, skipping log entry.");
       }
@@ -526,7 +811,7 @@ async function performBackup(env, owner, repoName, branch, cloneUrl) {
 
 async function checkAndCleanSpace(env, incomingSize = 0) {
   const setting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'r2_max_gb'").first();
-  const maxGB = parseFloat(setting ? setting.value : "10");
+  const maxGB = parseFloat(setting ? setting.value : "8");
   const maxBytes = maxGB * 1024 * 1024 * 1024;
   
   const { total } = await env.DB.prepare(
@@ -534,9 +819,12 @@ async function checkAndCleanSpace(env, incomingSize = 0) {
   ).first();
   let currentSize = total || 0;
 
-  // 如果空间够了，直接自动解除之前可能存在的熔断
+  // 如果空间够了，按需自动解除熔断（只在当前是熔断状态时才写，避免每次都产生无谓写入）
   if (currentSize + incomingSize <= maxBytes) {
-    await env.DB.prepare("UPDATE settings SET value = 'false' WHERE key = 'backup_paused'").run();
+    const pauseCheck = await env.DB.prepare("SELECT value FROM settings WHERE key = 'backup_paused'").first();
+    if (pauseCheck && pauseCheck.value === 'true') {
+      await env.DB.prepare("UPDATE settings SET value = 'false' WHERE key = 'backup_paused'").run();
+    }
     return;
   }
 
@@ -628,7 +916,7 @@ function loginPageHtml() {
 
 function adminPageHtml() {
   return `<!DOCTYPE html>
-<!-- v2.10 2026-11-22: 管理页布局优化，筛选仓库移至标题行左侧、标题靠右，刷新/退出按钮移至手动备份行右侧 -->
+<!-- v2.14 2026-11-23: 熔断状态按需写入减少冗余KV/D1写入；失败记录默认保留10条；标题显示版本号；修复弹窗换行错误 -->
 <html lang="zh-CN"><head><meta charset="UTF-8"><title>备份日志管理</title>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:20px;background:#f6f8fa;}
@@ -645,6 +933,7 @@ function adminPageHtml() {
   .btn-delete{background:#d73a49;}
   .btn:disabled{opacity:.6;cursor:not-allowed;}
   .col-time{width:160px;}.col-repo{width:180px;}.col-branch{width:100px;}.col-size{width:90px;}.col-status{width:70px;}.col-action{width:130px;}
+  .setting-item{margin-right: 16px;}
 </style></head>
 <body>
 <div class="container">
@@ -664,7 +953,7 @@ function adminPageHtml() {
   <div style="margin-top: 16px; padding: 12px; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
     <strong>全量备份组织：</strong>
     <input id="syncOrgName" type="text" placeholder="组织名 (如 ycscg-org)" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; width: 180px;" />
-    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;">
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
       单次最多备份：
       <input id="syncLimit" type="number" value="10" min="1" max="100" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 60px;" />
       个
@@ -674,13 +963,23 @@ function adminPageHtml() {
   </div>
   <div style="margin-top: 16px; padding: 12px; background: #eef2f5; border: 1px solid #cbd5e1; border-radius: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
     <strong>系统设置：</strong>
-    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;">
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
       R2 最大可用空间：
-      <input id="r2MaxGb" type="number" step="0.5" value="10" min="1" max="1000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 80px;" />
+      <input id="r2MaxGb" type="number" step="0.5" value="8" min="1" max="1000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 80px;" />
       GB
     </label>
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
+      每个仓库/分支最多保留备份：
+      <input id="backupRetainCount" type="number" value="5" min="1" max="100" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 60px;" />
+      个
+    </label>
+    <label style="font-size: 14px; display:flex; align-items:center; gap:4px;" class="setting-item">
+      失败记录最多保留：
+      <input id="failedRetainCount" type="number" value="100" min="0" max="10000" style="padding: 6px; border: 1px solid #ccc; border-radius: 4px; width: 70px;" />
+      条
+    </label>
     <button onclick="saveSettings()" style="padding: 6px 16px; background: #475569; color: #fff; border: none; border-radius: 4px; cursor: pointer;">保存设置</button>
-    <span style="font-size: 12px; color: #666; width: 100%;">提示：如果多个 Worker 共用 R2，请扣除其他项目占用的空间。例如 R2 总额度 10GB，其他占用 3GB，此处填 7。</span>
+    <span style="font-size: 12px; color: #666; width: 100%;">提示：1. 请根据你的CF计划类型合理设置最大使用R2空间限制；2. 调低成功备份保留数量会自动删除超出数量的旧备份（不可恢复）；3. 失败记录设为0将删除所有历史失败记录，相当于一键清空失败日志。</span>
   </div>
   <div style="margin-top: 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
     <div style="display: flex; align-items: center; gap: 8px;">
@@ -689,7 +988,7 @@ function adminPageHtml() {
         <option value="">全部仓库</option>
       </select>
     </div>
-    <h1 style="margin: 0; font-size: 22px;">GitHub 备份管理</h1>
+    <h1 style="margin: 0; font-size: 22px;">GitHub 备份管理 v2.14</h1>
   </div>
   <table id="logTable">
     <thead><tr>
@@ -751,15 +1050,30 @@ async function loadSettings() {
     const res = await fetch('/api/settings');
     if (res.status === 401) return;
     const data = await res.json();
-    if (data.success && data.settings.r2_max_gb) {
-      document.getElementById('r2MaxGb').value = data.settings.r2_max_gb;
+    if (data.success) {
+      if (data.settings.r2_max_gb) {
+        document.getElementById('r2MaxGb').value = data.settings.r2_max_gb;
+      }
+      if (data.settings.backup_retain_count) {
+        document.getElementById('backupRetainCount').value = data.settings.backup_retain_count;
+      }
+      if (data.settings.backup_failed_retain_count !== undefined) {
+        document.getElementById('failedRetainCount').value = data.settings.backup_failed_retain_count;
+      }
     }
   } catch(e) { console.error("加载设置失败", e); }
 }
 
 async function saveSettings() {
-  const val = document.getElementById('r2MaxGb').value;
-  if (!val || parseFloat(val) < 1) return alert('请输入有效的数值');
+  const r2MaxGbVal = document.getElementById('r2MaxGb').value;
+  const retainCountVal = document.getElementById('backupRetainCount').value;
+  const failedRetainCountVal = document.getElementById('failedRetainCount').value;
+  const newRetainCount = parseInt(retainCountVal, 10);
+  const newFailedRetainCount = parseInt(failedRetainCountVal, 10);
+  
+  if (!r2MaxGbVal || parseFloat(r2MaxGbVal) < 1) return alert('请输入有效的R2最大空间数值');
+  if (!Number.isFinite(newRetainCount) || newRetainCount < 1) return alert('请输入有效的成功备份保留数量（≥1）');
+  if (!Number.isFinite(newFailedRetainCount) || newFailedRetainCount < 0) return alert('请输入有效的失败记录保留数量（≥0，0表示不保留任何失败记录）');
   
   const btn = document.querySelector('button[onclick="saveSettings()"]');
   const originalText = btn.textContent;
@@ -767,24 +1081,131 @@ async function saveSettings() {
   btn.textContent = '保存中...';
   
   try {
-    const res = await fetch('/api/settings', {
+    // 先统计如果调整保留数量需要删除多少备份
+    let successDeleteCount = 0;
+    let failedDeleteCount = 0;
+    const countRes = await fetch('/api/backup/cleanup-count', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ r2_max_gb: parseFloat(val) })
+      body: JSON.stringify({
+        backup_retain_count: newRetainCount,
+        backup_failed_retain_count: newFailedRetainCount
+      })
     });
-    const result = await res.json();
-    if (result.success) {
-      alert('设置已更新');
+    const countData = await countRes.json();
+    if (!countData.success) {
+      throw new Error(countData.message || '统计待删除备份失败');
+    }
+    successDeleteCount = countData.successDeleteCount;
+    failedDeleteCount = countData.failedDeleteCount;
+    const totalDeleteCount = countData.deleteCount;
+
+    // 如果有需要删除的备份，弹窗确认
+    if (totalDeleteCount > 0) {
+      let confirmMsg = '此操作将删除：\\n';
+      if (successDeleteCount > 0) confirmMsg += "- " + successDeleteCount + " 个超出保留数量的成功备份（含R2文件）\\n";
+      if (failedDeleteCount > 0) {
+        if (newFailedRetainCount === 0) {
+          confirmMsg += "- " + failedDeleteCount + " 条历史失败记录（清空所有失败日志）\\n";
+        } else {
+          confirmMsg += "- " + failedDeleteCount + " 条超出保留数量的失败记录\\n";
+        }
+      }
+      confirmMsg += '合计 ' + totalDeleteCount + ' 条记录，删除后不可恢复，是否继续？';
+      if (!confirm(confirmMsg)) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+        return;
+      }
+
+      // 提交清理任务
+      const cleanupRes = await fetch('/api/backup/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          backup_retain_count: newRetainCount,
+          backup_failed_retain_count: newFailedRetainCount
+        })
+      });
+      const cleanupResult = await cleanupRes.json();
+      if (!cleanupResult.success) {
+        throw new Error(cleanupResult.message || '提交清理任务失败');
+      }
+
+      btn.textContent = '清理中...';
+      // 轮询清理结果
+      pollCleanupStatus(btn, originalText, parseFloat(r2MaxGbVal));
+      return;
+    }
+
+    // 没有需要删除的备份，直接保存设置
+    const saveRes = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        r2_max_gb: parseFloat(r2MaxGbVal),
+        backup_retain_count: newRetainCount,
+        backup_failed_retain_count: newFailedRetainCount
+      })
+    });
+    const saveResult = await saveRes.json();
+    if (saveResult.success) {
+      alert('设置已更新，无需清理旧备份');
       loadLogs();
     } else {
-      alert('保存失败：' + result.message);
+      alert('保存失败：' + saveResult.message);
     }
   } catch(e) {
-    alert('请求失败：' + e.message);
+    alert('操作失败：' + e.message);
   } finally {
     btn.disabled = false;
     btn.textContent = originalText;
   }
+}
+
+async function pollCleanupStatus(btn, originalText, r2MaxGb) {
+  let attempts = 0;
+  const poll = async () => {
+    try {
+      attempts++;
+      if (attempts > 60) {
+        alert('清理任务超时，已等待3分钟，请稍后刷新日志查看结果');
+        btn.disabled = false;
+        btn.textContent = originalText;
+        loadLogs();
+        return;
+      }
+      const res = await fetch('/api/backup/cleanup-status');
+      const data = await res.json();
+      if (data.status === 'pending') {
+        btn.textContent = '清理中... (' + (attempts * 3) + 's)';
+        setTimeout(poll, 3000);
+      } else if (data.status === 'done') {
+        // 清理成功后保存所有设置
+        await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            r2_max_gb: r2MaxGb,
+            backup_failed_retain_count: parseInt(document.getElementById('failedRetainCount').value, 10)
+          })
+        });
+        alert('设置已保存：' + data.message);
+        btn.disabled = false;
+        btn.textContent = originalText;
+        loadLogs();
+      } else if (data.status === 'error') {
+        alert('清理失败：' + data.message);
+        btn.disabled = false;
+        btn.textContent = originalText;
+        loadLogs();
+      }
+    } catch (e) {
+      console.error('轮询清理状态失败', e);
+      setTimeout(poll, 3000);
+    }
+  };
+  poll();
 }
 
 async function resumeBackups() {
@@ -828,7 +1249,7 @@ async function triggerManualBackup() {
     });
     const result = await res.json();
     if (result.success) {
-      btn.textContent = '备份中...';
+      btn.textContent = '备份中 (' + result.branch + ')...';
       pollManualStatus(btn);
     } else {
       alert('提交失败：' + result.message);
@@ -876,7 +1297,7 @@ async function pollManualStatus(btn) {
       setTimeout(poll, 3000);
     }
   };
-  poll();
+  setTimeout(poll, 2000);
 }
 
 let isPolling = false; 
@@ -1051,6 +1472,13 @@ async function handleGetSettings(request, env) {
     for (const row of results) {
       settings[row.key] = row.value;
     }
+    // 如果没有设置过保留数量，返回默认值
+    if (!settings.backup_retain_count) {
+      settings.backup_retain_count = BACKUP_RETAIN_COUNT_DEFAULT.toString();
+    }
+    if (settings.backup_failed_retain_count === undefined) {
+      settings.backup_failed_retain_count = BACKUP_FAILED_RETAIN_COUNT_DEFAULT.toString();
+    }
     return Response.json({ success: true, settings });
   } catch (e) {
     return Response.json({ success: false, message: e.message }, { status: 500 });
@@ -1073,6 +1501,24 @@ async function handleSaveSettings(request, env) {
       await env.DB.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_paused', ?)"
       ).bind(body.backup_paused).run();
+    }
+
+    if (body.backup_retain_count !== undefined) {
+      const retainCount = parseInt(body.backup_retain_count, 10);
+      if (Number.isFinite(retainCount) && retainCount >= 1) {
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_retain_count', ?)"
+        ).bind(retainCount.toString()).run();
+      }
+    }
+
+    if (body.backup_failed_retain_count !== undefined) {
+      const failedRetainCount = parseInt(body.backup_failed_retain_count, 10);
+      if (Number.isFinite(failedRetainCount) && failedRetainCount >= 0) {
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_failed_retain_count', ?)"
+        ).bind(failedRetainCount.toString()).run();
+      }
     }
     
     return Response.json({ success: true, message: "设置已保存" });

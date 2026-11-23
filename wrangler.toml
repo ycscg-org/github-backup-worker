@@ -23,9 +23,6 @@ bucket_name = "github-backup-bucket" # 替换为你的 R2 Bucket Name
 binding = "KV"
 id = "7109ce428e324caa821c8bd2722a236b" # 替换为你自己创建的 KV 命名空间 ID
 
-[vars]
-BACKUP_RETAIN_COUNT = "5"
-BACKUP_FAILED_RETAIN_COUNT = "5"
 # 其他敏感环境变量提示 (通过 wrangler secret put 设置，不要硬编码在这里)
 # GITHUB_TOKEN: 你的 GitHub Personal Access Token
 # WEBHOOK_SECRET: GitHub Webhook 的 Secret

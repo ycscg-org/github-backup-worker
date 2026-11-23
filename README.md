@@ -1,14 +1,14 @@
 # GitHub Backup Worker
 
-一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，并带实时进度反馈和 R2 空间熔断保护。
+一套基于 Cloudflare Workers 的零服务器 GitHub 仓库自动备份方案。仓库 push 时由 GitHub Webhook 唤起 Worker 拉取 tarball 存入 R2，备份记录写入 D1；内置管理面板可查看日志、手动备份单个仓库或整个组织、下载与删除历史备份，备份保留数量也可在面板中调整，并带实时进度反馈和 R2 空间熔断保护。
 
 ## 架构
 
 - **GitHub Webhook**：仓库 push 时触发，HMAC-SHA256 签名校验
 - **Cloudflare Worker**：接收 Webhook、拉取 tarball、写 R2/D1、托管管理页
 - **R2**：存储 `.tar.gz` 备份文件
-- **D1**：`backups` 表存备份记录，`settings` 表存面板设置
-- **KV**：暂存单库备份（`manual_backup_result`）与全量备份（`sync_result`）的进度和结果
+- **D1**：`backups` 表存备份记录，`settings` 表存面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`）
+- **KV**：暂存单库备份（`manual_backup_result`）、全量备份（`sync_result`）与批量清理（`cleanup_result`）的进度和结果
 
 ## 功能
 
@@ -17,8 +17,9 @@
 - ✅ 内置管理面板：日志列表、按仓库筛选、下载、删除
 - ✅ 手动备份单库：提交前校验仓库是否存在，分支留空时自动识别仓库默认分支（main / master / develop 等）
 - ✅ 全量备份组织：对比 `pushed_at` 自动跳过无更新的仓库，单次处理数量可调，完成后弹窗汇总成功 / 失败 / 跳过数量
+- ✅ 备份保留策略：每个（仓库、分支）保留最近 N 条成功备份，N 可在管理面板调整（默认 5）
+- ✅ 批量清理旧备份：调低保留数量保存时，自动统计超量备份并弹窗确认，随后在后台批量删除，完成或失败均弹窗反馈
 - ✅ R2 空间熔断保护：占用超过设定上限时先自动清理冗余旧备份（每个仓库仅保留最新一条），仍不足则暂停全部备份
-- ✅ 备份保留策略：每个（仓库、分支）保留最近 5 条成功备份
 - ✅ 纯 Cloudflare 免费额度内可运行（R2 10GB / D1 5GB / KV 写入 1000 次/天 / Worker 10 万请求/天）
 
 ## 项目结构
@@ -134,7 +135,7 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 `init.sql` 建两张表：
 
 - `backups`：备份记录（`repo_name`、`branch`、`file_name`、`file_size`、`status`、`error_msg`、`created_at`）及其索引
-- `settings`：面板设置（`r2_max_gb`、`backup_paused`）
+- `settings`：面板设置（`r2_max_gb`、`backup_paused`、`backup_retain_count`）
 
 ### 6. 设置 Secret
 
@@ -242,6 +243,7 @@ npx wrangler deploy
 **系统设置**
 
 - 「R2 最大可用空间」：设定可用于备份的空间上限（GB）。若多个 Worker 共用同一个 R2 桶，请扣除其他项目占用的空间
+- 「每个仓库/分支最多保留备份」：设定每个（仓库、分支）保留的成功备份条数，默认 5，范围 1–100。调低数值保存时，会先统计并弹窗提示将要删除的旧备份数量，确认后由后台批量删除超量备份（同时删除 R2 文件与 D1 记录），完成或中途失败都会弹窗反馈结果
 - 空间不足触发熔断时，页面顶部出现红色横幅，清理旧备份腾出空间后点击「恢复备份」即可解除
 
 **日志列表**
@@ -251,17 +253,15 @@ npx wrangler deploy
 
 ## 环境变量
 
-Secret 通过 `wrangler secret put` 设置，Var 在 `wrangler.toml` 的 `[vars]` 中修改。
+本项目只需三个 Secret，均通过 `wrangler secret put` 设置（见下方第 6 步），无需在 `wrangler.toml` 中配置任何 Var。
 
 | 名称 | 类型 | 说明 |
 |---|---|---|
 | `GITHUB_TOKEN` | Secret | GitHub PAT，拉取 tarball 用 |
 | `WEBHOOK_SECRET` | Secret | Webhook HMAC 校验密钥 |
 | `ADMIN_PASSWORD` | Secret | 管理面板密码 |
-| `BACKUP_RETAIN_COUNT` | Var | 每个（仓库、分支）保留的成功备份数 |
-| `BACKUP_FAILED_RETAIN_COUNT` | Var | 每个（仓库、分支）保留的失败记录数 |
 
-> 提示：当前版本的成功备份保留数量由 `src/index.js` 顶部的常量 `BACKUP_RETAIN_COUNT = 5` 决定，`wrangler.toml` 中的同名 Var 尚未被代码读取，失败记录也暂未参与自动清理。如需调整保留数量，请直接修改该常量。
+> 提示：备份保留数量已改由管理面板「系统设置」中配置，保存在 D1 的 `settings` 表（键 `backup_retain_count`），默认 5。`src/index.js` 顶部的 `BACKUP_RETAIN_COUNT_DEFAULT = 5` 仅作为未设置时的默认值，无需再改代码。失败记录不参与自动清理。
 
 ## 本地开发
 

@@ -991,11 +991,19 @@ function adminPageHtml(dict) {
   .btn-download{background:#28a745;}
   .btn-delete{background:#d73a49;}
   .btn:disabled{opacity:.6;cursor:not-allowed;}
-  .col-time{width:160px;}.col-repo{width:180px;}.col-branch{width:100px;}.col-size{width:90px;}.col-status{width:70px;}.col-action{width:130px;}
+  .col-time{width:130px;}.col-repo{width:120px;}.col-branch{width:90px;}.col-size{width:80px;}.col-status{width:70px;}.col-action{width:120px;}
+  .col-file{width: 250px; word-break: break-all;}
+  .col-msg{width: 150px; word-break: break-all;}
   .setting-item{margin-right: 16px;}
 </style></head>
 <body>
 <div class="container">
+  <!-- 顶部标题栏 -->
+  <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e4e8; padding-bottom: 12px; margin-bottom: 20px;">
+    <h1 style="margin: 0; font-size: 24px; color: #24292e;" data-i18n="headerTitle">GitHub 仓库备份管理</h1>
+    <span style="background: #e1e4e8; color: #586069; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600;">v2.21</span>
+  </div>
+
   <div id="pauseWarning" style="margin-bottom: 20px; padding: 15px; background: #ffebe9; border: 1px solid #ff8182; border-radius: 6px; color: #d73a49; display: none; justify-content: space-between; align-items: center;">
     <strong id="pauseWarningText" data-i18n="pauseWarning"></strong>
     <button id="resumeBtn" onclick="resumeBackups()" data-i18n="resumeBackup" style="padding: 6px 16px; background: #d73a49; color: #fff; border: none; border-radius: 4px; cursor: pointer;"></button>
@@ -1047,6 +1055,12 @@ function adminPageHtml(dict) {
         <option value="" data-i18n="allRepos"></option>
       </select>
     </div>
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <label for="ownerFilter" id="filterOwnerLabel" data-i18n="filterOwner" style="font-weight: 600; color: #24292e;"></label>
+      <select id="ownerFilter" onchange="renderTable()" style="padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px;">
+        <option value="" data-i18n="allOwners"></option>
+      </select>
+    </div>
     <div style="display:flex; align-items:center; gap:8px;">
       <h1 id="pageTitle" style="margin: 0; font-size: 22px;"></h1>
       <div style="display:flex; gap:4px;" class="lang-switcher">
@@ -1055,15 +1069,21 @@ function adminPageHtml(dict) {
       </div>
     </div>
   </div>
-  <table id="logTable">
-    <thead><tr>
-      <th class="col-time" data-i18n="tableTime"></th><th class="col-repo" data-i18n="tableRepo"></th><th class="col-branch" data-i18n="tableBranch"></th>
-      <th data-i18n="tableFileName"></th><th class="col-size" data-i18n="tableSize"></th><th class="col-status" data-i18n="tableStatus"></th>
-      <th data-i18n="tableError"></th><th class="col-action" data-i18n="tableAction"></th>
-    </tr></thead>
-    <tbody><tr><td colspan="8" data-i18n="loading"></td></tr></tbody>
-  </table>
-</div>
+  <div style="overflow-x: auto;">
+    <table id="logTable">
+      <thead><tr>
+        <th class="col-time" data-i18n="tableTime"></th>
+        <th class="col-repo" data-i18n="tableRepo"></th>
+        <th class="col-branch" data-i18n="tableBranch"></th>
+        <th class="col-file" data-i18n="tableFileName"></th> <!-- 加上了 class="col-file" -->
+        <th class="col-size" data-i18n="tableSize"></th>
+        <th class="col-status" data-i18n="tableStatus"></th>
+        <th class="col-msg" data-i18n="tableError"></th>
+        <th class="col-action" data-i18n="tableAction"></th>
+      </tr></thead>
+      <tbody><tr><td colspan="8" data-i18n="loading"></td></tr></tbody>
+    </table>
+  </div>
 <script>
     const dict = ${JSON.stringify(dict)};
     let currentLang = 'zh';
@@ -1139,6 +1159,21 @@ function adminPageHtml(dict) {
         select.appendChild(opt);
       });
       if (repos.includes(currentVal)) select.value = currentVal;
+
+      const ownerSelect = document.getElementById('ownerFilter');
+      const currentOwnerVal = ownerSelect.value;
+      const owners = [...new Set(allLogs.map(l => {
+        if (!l.repo_name) return null;
+        return l.repo_name.split('/')[0];
+      }).filter(Boolean))].sort();
+
+      ownerSelect.innerHTML = '<option value="">' + t('allOwners') + '</option>';
+      owners.forEach(owner => {
+        const opt = document.createElement('option');
+        opt.value = owner; opt.textContent = owner; ownerSelect.appendChild(opt);
+      });
+      if (owners.includes(currentOwnerVal)) ownerSelect.value = currentOwnerVal;
+
       // 重新渲染表格（用当前最新语言）
       renderTable();
     }
@@ -1176,6 +1211,22 @@ function adminPageHtml(dict) {
           opt.value = repo; opt.textContent = repo; select.appendChild(opt);
         });
         if (repos.includes(currentVal)) select.value = currentVal;
+
+        const ownerSelect = document.getElementById('ownerFilter');
+        const currentOwnerVal = ownerSelect.value;
+        // 提取唯一的 owner（repo_name 格式为 "owner/repo"）
+        const owners = [...new Set(allLogs.map(l => {
+          if (!l.repo_name) return null;
+          return l.repo_name.split('/')[0];
+        }).filter(Boolean))].sort();
+        
+        ownerSelect.innerHTML = '<option value="">' + t('allOwners') + '</option>';
+        owners.forEach(owner => {
+          const opt = document.createElement('option');
+          opt.value = owner; opt.textContent = owner; ownerSelect.appendChild(opt);
+        });
+        if (owners.includes(currentOwnerVal)) ownerSelect.value = currentOwnerVal;
+
         renderTable();
       } catch(e) {
         console.error(e);
@@ -1396,9 +1447,26 @@ function adminPageHtml(dict) {
     function renderTable(){
       const tbody = document.querySelector('#logTable tbody');
       tbody.innerHTML = '';
+      
+      // 👇 获取两个筛选条件
       const selectedRepo = document.getElementById('repoFilter').value;
-      const filteredLogs = selectedRepo ? allLogs.filter(l => l.repo_name === selectedRepo) : allLogs;
-      if (filteredLogs.length === 0) { tbody.innerHTML = '<tr><td colspan="8">' + t('noRecords') + '</td></tr>'; return; }
+      const selectedOwner = document.getElementById('ownerFilter').value;
+
+      // 过滤逻辑：同时满足作者和仓库条件
+      const filteredLogs = allLogs.filter(log => {
+        if (!log.repo_name) return !selectedRepo && !selectedOwner; // 如果 repo_name 为空，只有两个筛选都没选时才显示
+        const [owner] = log.repo_name.split('/');
+        const matchRepo = !selectedRepo || log.repo_name === selectedRepo;
+        const matchOwner = !selectedOwner || owner === selectedOwner;
+        return matchRepo && matchOwner;
+      });
+
+      if (filteredLogs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8">' + t('noRecords') + '</td></tr>';
+        return;
+      }
+
+      const lang = getLang();
       filteredLogs.forEach(log => {
         const tr = document.createElement('tr');
         const isSuccess = log.status === 'done' || log.status === 'success';

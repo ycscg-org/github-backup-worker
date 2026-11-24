@@ -25,6 +25,7 @@ const dict = {
     cancel: '取消',
     
     // 头部与按钮
+    headerTitle: 'GitHub 仓库备份管理',
     refreshLogs: '刷新日志',
     logout: '退出',
     startBackup: '开始备份',
@@ -95,6 +96,8 @@ const dict = {
     
     // 筛选与标题
     filterRepo: '筛选仓库：',
+    filterOwner: '筛选作者/组织：',
+    allOwners: '全部作者/组织',
     allRepos: '全部仓库',
     pageTitle: 'GitHub 备份管理',
     
@@ -183,6 +186,7 @@ const dict = {
     cancel: 'Cancel',
     
     // Header & Buttons
+    headerTitle: 'GitHub Repository Backup Management',
     refreshLogs: 'Refresh Logs',
     logout: 'Logout',
     startBackup: 'Start Backup',
@@ -253,6 +257,8 @@ const dict = {
     
     // Filter & title
     filterRepo: 'Filter repository:',
+    filterOwner: 'Filter owner:',
+    allOwners: 'All owners',
     allRepos: 'All repositories',
     pageTitle: 'GitHub Backup Management',
     

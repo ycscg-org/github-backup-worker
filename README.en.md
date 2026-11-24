@@ -2,44 +2,40 @@
 
 **English** | [简体中文](./README.md)
 
-A zero-server, automatic GitHub repository backup solution built on Cloudflare Workers. On every repository push, a GitHub Webhook wakes the Worker to pull the tarball into R2 and write the backup record to D1. A built-in admin panel lets you browse logs, manually back up a single repository or an entire organization, download and delete historical backups, and configure how many backups and failure records to keep — with live progress feedback and R2 storage circuit-breaker protection. The admin panel supports instant switching between Chinese and English.
+A zero-server, automatic GitHub repository backup solution built on Cloudflare Workers. When a repository is pushed, a GitHub Webhook wakes the Worker to fetch the tarball and store it in R2, while the backup record is written to D1. The built-in admin panel lets you view logs, manually back up a single repository or an entire organization, and download or delete historical backups; the retention counts for both backups and failed records can also be adjusted from the panel, along with a cap on R2 space usage.
 
 ## Architecture
 
-- **GitHub Webhook**: triggered on repository push, verified with an HMAC-SHA256 signature
-- **Cloudflare Worker**: receives Webhooks, pulls tarballs, writes to R2/D1, and serves the admin panel
-- **R2**: stores `.tar.gz` backup files
+- **GitHub Webhook**: triggered on repository push, with HMAC-SHA256 signature verification
+- **Cloudflare Worker**: receives the Webhook, fetches the tarball, writes to R2/D1, and hosts the admin page
+- **R2**: stores the `.tar.gz` backup files
 - **D1**: the `backups` table holds backup records; the `settings` table holds panel settings (`r2_max_gb`, `backup_paused`, `backup_retain_count`, `backup_failed_retain_count`)
-- **KV**: temporarily holds the progress and results of single-repository backups (`manual_backup_result`), organization-wide backups (`sync_result`), and batch cleanup (`cleanup_result`)
+- **KV**: temporarily stores the progress and results of single-repo backups (`manual_backup_result`), full backups (`sync_result`), and batch cleanup (`cleanup_result`)
 
 ## Features
 
-- ✅ Automatic backups triggered by GitHub Webhook (HMAC-SHA256 signature verification)
-- ✅ Streaming upload to R2 (`FixedLengthStream`, no OOM on large repositories)
-- ✅ Built-in admin panel: log list, filter by repository, download, delete
-- ✅ Manual single-repository backup: validates that the repository exists before submitting; when the branch is left empty it auto-detects the default branch (main / master / develop, etc.)
-- ✅ Organization-wide backup: compares `pushed_at` to skip repositories with no updates; the per-run batch size is configurable; a summary dialog reports the succeeded / failed / skipped counts when finished
-- ✅ Backup retention policy: keeps the latest N successful backups per (repository, branch); N is configurable in the admin panel (default 5)
-- ✅ Batch cleanup of old backups: when you lower the retention count, the excess backups are counted and a confirmation dialog appears; after you confirm, they are deleted in the background, with a dialog reporting success or failure
-- ✅ Failed-record retention policy: keeps the latest M failed records per (repository, branch); M is configurable in the admin panel (default 10); setting it to 0 clears all historical failure logs
-- ✅ R2 storage circuit breaker: when usage exceeds the configured limit it first auto-cleans redundant old backups (keeping only the latest one per repository); if that is still not enough it pauses all backups
-- ✅ The admin panel supports instant switching between Chinese and English (on both the login page and the admin page; the choice is saved in the browser)
-- ✅ Runs within the Cloudflare free tier (R2 10 GB / D1 5 GB / KV 1,000 writes per day / Worker 100,000 requests per day)
+- ✅ Fully automatic backup: GitHub Webhook triggers automatic backups (HMAC-SHA256 signature verification)
+- ✅ Built-in admin panel: log list, filtering by [repository / author / organization], download, delete; the panel supports real-time switching between Chinese and English
+- ✅ Manual single-repo backup: validates that the repository exists before submitting; when the branch is left blank, it automatically detects the repository's default branch (main / master / develop, etc.)
+- ✅ Full organization backup: compares `pushed_at` to automatically skip repositories with no updates; the number processed per run is adjustable; a summary popup shows the success / failure / skipped counts when done
+- ✅ Batch cleanup of old backups: when you lower the retention count and save, the excess backups are counted and a confirmation popup appears, after which they are deleted in the background in batches; completion or failure both trigger a popup
+- ✅ R2 space circuit-breaker protection: when usage exceeds the configured cap, redundant old backups are cleaned up first (keeping only the latest one per repository); if still insufficient, all backup functions are paused
+- ✅ Low resource usage: runs within Cloudflare's free tier (R2 10GB / D1 5GB / KV writes 1000/day / Worker 100,000 requests/day)
 
 ## Project Structure
 
 ```text
 github-backup-worker/
-├── wrangler.toml         # Wrangler config (D1/R2/KV bindings, custom domain routes)
-├── init.sql              # D1 init script (backups and settings tables, indexes)
+├── wrangler.toml         # Wrangler configuration (D1/R2/KV bindings, custom domain routes)
+├── init.sql              # D1 initialization script (backups table, settings table and indexes)
 ├── src/
 │   ├── index.js          # Worker core logic (routing, backup, admin panel, API)
-│   └── i18n.js           # UI dictionaries (Chinese / English)
-├── .env.example          # Local development environment variable template
+│   └── i18n.js           # UI bilingual dictionary (Chinese / English)
+├── .env.example          # Local development environment variable example
 ├── .gitignore
 ├── LICENSE               # MIT
-├── RESOURCE-LIMITS.md    # Free-tier usage estimates & WAF hardening advice (Chinese)
-├── RESOURCE-LIMITS.en.md # Free-tier usage estimates & WAF hardening advice (English)
+├── RESOURCE-LIMITS.md    # Free-tier usage estimation and WAF hardening advice (Chinese)
+├── RESOURCE-LIMITS.en.md # Same as above (English)
 ├── README.md             # Chinese documentation
 └── README.en.md          # English documentation (this file)
 ```
@@ -48,11 +44,11 @@ github-backup-worker/
 
 - A Cloudflare account (the free plan is enough)
 - Node.js 18+
-- A GitHub Personal Access Token (**classic**, with the `repo` scope; `public_repo` is also enough if you only back up public repositories)
+- A GitHub Personal Access Token (**classic** type, with the `repo` scope checked; if you only back up public repositories, `public_repo` is also fine)
 
-## Deployment
+## Deployment Steps
 
-### 1. Clone the project
+### 1. Clone the project locally
 
 ```bash
 git clone https://github.com/ycscg-org/github-backup-worker.git
@@ -65,7 +61,7 @@ cd github-backup-worker
 npx wrangler login
 ```
 
-### 3. Create the Cloudflare resources
+### 3. Create Cloudflare resources
 
 ```bash
 npx wrangler r2 bucket create github-backup-bucket
@@ -73,18 +69,18 @@ npx wrangler d1 create github-backup-db
 npx wrangler kv namespace create bakgit-status-kv
 ```
 
-- `d1 create` outputs a `database_id`; put it into `wrangler.toml`.
-- `kv namespace create` outputs the KV `id`; put it into `wrangler.toml`.
+- `d1 create` outputs a `database_id`; fill it into `wrangler.toml`.
+- `kv namespace create` outputs the KV `id`; fill it into `wrangler.toml`.
 
-### 4. Edit the config file (⚠️ the most important step)
+### 4. Edit the configuration file (⚠️ the most important step)
 
-After creating the R2 bucket, D1 database, and KV namespace, you must edit `wrangler.toml` to bind these resources to your own Cloudflare account. If you skip this, deployment will fail.
+After creating the R2 bucket, D1 database, and KV namespace in the terminal, you must edit `wrangler.toml` to bind the resources to your own Cloudflare account. If you do not, the deployment will certainly fail.
 
-Open `wrangler.toml` in the project root with a text editor and change the following four places:
+Open `wrangler.toml` in the project root with a text editor; you need to change four places:
 
-**① Update the D1 database ID**
+**① Change the D1 database ID**
 
-Find the `[[d1_databases]]` block:
+Find the `[[d1_databases]]` section:
 
 ```toml
 [[d1_databases]]
@@ -93,11 +89,11 @@ database_name = "github-backup-db"
 database_id = "66666f4a-d0f9-486d-8541-137199dd8468"   # replace with your own ID
 ```
 
-👉 How to find your ID: run `npx wrangler d1 list`, find the `github-backup-db` you just created, and copy its UUID into the quotes.
+👉 How to find your ID? Run `npx wrangler d1 list`, locate the `github-backup-db` you just created, and copy the corresponding UUID to replace the content inside the quotes.
 
-**② Update the R2 bucket name**
+**② Change the R2 bucket name**
 
-Find the `[[r2_buckets]]` block:
+Find the `[[r2_buckets]]` section:
 
 ```toml
 [[r2_buckets]]
@@ -105,11 +101,11 @@ binding = "BUCKET"
 bucket_name = "github-backup-bucket"   # replace with your own bucket name
 ```
 
-👉 How to find the bucket name: run `npx wrangler r2 bucket list`, find the bucket you created and replace it (if you used the command above, this is already `github-backup-bucket` and needs no change).
+👉 How to find the bucket name? Run `npx wrangler r2 bucket list`, locate the bucket you created and replace it (if you copied the creation command above exactly, this will be `github-backup-bucket` and no change is needed).
 
-**③ Update the custom domain route (or comment it out)**
+**③ Change the custom domain route (or comment it out)**
 
-Find the `routes` block:
+Find the `routes` section:
 
 ```toml
 routes = [
@@ -117,14 +113,14 @@ routes = [
 ]
 ```
 
-👉 Notes:
+👉 Note:
 
-- `ai99cn.com` is the author's own domain. If you have your own domain on Cloudflare, change it to your own subdomain and root domain.
-- If you don't have a domain, you must comment out the three lines `routes = [`, `{ pattern...}`, and `]` by prefixing each with `#`. Otherwise deployment fails with a "zone not found" error.
+- Here "ai99cn.com" is the author's own domain. If you have your own domain on Cloudflare, change it to your own "subdomain" and "root domain".
+- If you do not have your own domain, you must add a `#` in front of the three lines `routes = [`, `{ pattern...}` and `]` to comment them out. Otherwise deployment will fail with a "domain not found" error.
 
-**④ Update the KV namespace ID**
+**④ Change the KV namespace ID**
 
-Find the `[[kv_namespaces]]` block (add it manually if missing):
+Find the `[[kv_namespaces]]` section (add it manually if it is missing):
 
 ```toml
 [[kv_namespaces]]
@@ -132,7 +128,7 @@ binding = "KV"
 id = "7109ce428e324caa821c8bd2722a236b" # replace with the KV ID you just created
 ```
 
-👉 Note: the binding must be `"KV"` — do not change it, or `env.KV` in the code will fail.
+👉 Note: `binding` must be written as `"KV"` and must not be changed, otherwise `env.KV` in the code will fail.
 
 ### 5. Initialize the D1 schema
 
@@ -145,56 +141,55 @@ npx wrangler d1 execute github-backup-db --remote --file=./init.sql
 - `backups`: backup records (`repo_name`, `branch`, `file_name`, `file_size`, `status`, `error_msg`, `created_at`) and their indexes
 - `settings`: panel settings (`r2_max_gb`, `backup_paused`, `backup_retain_count`, `backup_failed_retain_count`)
 
-### 6. Set secrets
+### 6. Set the Secrets
 
-This project needs three secrets: `GITHUB_TOKEN`, `WEBHOOK_SECRET`, and `ADMIN_PASSWORD`. All three are written one by one with `wrangler secret put`; the terminal then prompts `Enter a secret value:` — paste the value and press Enter (input is not echoed). Running the same command again overwrites the old value.
+This project needs three Secrets: `GITHUB_TOKEN`, `WEBHOOK_SECRET`, `ADMIN_PASSWORD`. All three values are written one by one via `wrangler secret put`; after running the command the terminal prompts `Enter a secret value:`, and you paste the content and press Enter (input is not echoed). Running a command with the same name again simply overwrites the old value.
 
-#### 6.1 Create a GitHub PAT (classic)
+#### 6.1 Generate a GitHub PAT (classic)
 
-`GITHUB_TOKEN` is the credential that lets the Worker pull code, and it has two main purposes:
+`GITHUB_TOKEN` is the key credential that lets the Worker fetch code smoothly; it mainly serves two purposes:
+1. **Bypass API rate limits**: unauthenticated requests are limited to 60 per hour, while authenticated requests can reach 5000 per hour. Without a Token, "full organization backup" can easily hit the rate limit and fail in large batches.
+2. **Read private repositories**: although public repositories can be fetched without a Token, if you want to back up **your own private repositories**, or other people's private repositories you have access to as a collaborator, you must provide authorization via a Token.
 
-1. **Avoid API rate limits**: unauthenticated requests are limited to 60 per hour, while authenticated requests allow 5,000 per hour. Without a token, organization-wide backups easily hit the rate limit and fail en masse.
-2. **Read private repositories**: although public repositories can be pulled without a token, you must provide one to back up **your own private repositories** or private repositories you can access as a collaborator.
+GitHub has two types of Token: Fine-grained and classic. This project **does not use Fine-grained Tokens**—each one can only authorize repositories under a single resource owner (yourself or one organization), so cross-organization or batch backups require generating them one by one and easily miss repositories, causing gaps in batch backups. Therefore **Personal access tokens (classic)** are used uniformly: a single `repo` scope covers all repositories accessible under your account.
 
-GitHub offers two kinds of tokens: Fine-grained and classic. This project **does not use Fine-grained tokens** — each one authorizes repositories under only a single resource owner (yourself or one organization), so cross-organization or batch backups require generating many tokens one by one and easily miss repositories. Instead it uses **Personal access tokens (classic)**: a single `repo` scope covers every accessible repository under the account.
+Generation steps:
 
-Steps:
+1. Log in to GitHub and click your avatar in the top-right corner → **Settings**.
+2. In the left sidebar, scroll to the bottom and click **Developer settings**.
+3. Choose **Personal access tokens** → **Tokens (classic)** → click **Generate new token (classic)**.
+4. Fill in a **Note** (a name of your choice, such as `github-backup-worker`) and set an **Expiration** (90 days is recommended; you can also choose No expiration in the dropdown, but it is not recommended).
+5. **Select scopes**: check **repo** (this project only needs to read repository content; classic has no finer read-only option, so checking `repo` is fine; if you only back up public repositories, `public_repo` is enough as well).
+6. Click **Generate token** at the bottom, and the page will show a token starting with `ghp_`. **This token is shown only once, so copy and save it immediately.**
+7. If the token needs to access an organization with SAML SSO enabled, after generating it you must also click **Configure SSO** → **Authorize** in the token list to complete the authorization, otherwise accessing that organization's private repositories will return 404.
 
-1. Sign in to GitHub and click your avatar in the top-right → **Settings**.
-2. Scroll the left sidebar to the bottom and click **Developer settings**.
-3. Choose **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**.
-4. Fill in **Note** (any name, e.g. `github-backup-worker`) and set **Expiration** (90 days recommended; No expiration is available but not recommended).
-5. Under **Select scopes**, check **repo** (this project only needs to read repository content; classic has no finer read-only scope, so `repo` is fine — if you only back up public repositories, `public_repo` is enough).
-6. Click **Generate token** at the bottom; the page shows a token starting with `ghp_`. **It is displayed only once, so copy and save it immediately.**
-7. If the token must access an organization with SAML SSO enabled, after creating it click **Configure SSO** → **Authorize** in the token list; otherwise accessing that organization's private repositories returns 404.
-
-Once you have the token, store it as a secret:
+Once you have the token, write it as a Secret:
 
 ```bash
-npx wrangler secret put GITHUB_TOKEN      # paste the ghp_xxx token generated above
+npx wrangler secret put GITHUB_TOKEN      # paste the ghp_xxx generated in the previous step
 ```
 
-#### 6.2 Generate a random string for WEBHOOK_SECRET
+#### 6.2 Generate a random string as WEBHOOK_SECRET
 
-`WEBHOOK_SECRET` is used to verify the HMAC-SHA256 signature of the GitHub Webhook and must be a sufficiently random string. Generate one with either command below (run it in your local terminal):
+`WEBHOOK_SECRET` is used to verify the HMAC-SHA256 signature of the GitHub Webhook and needs a sufficiently random string. You can generate one with the command below (choose either one, run it in your local terminal):
 
 ```bash
-# Option 1: openssl (bundled with macOS/Linux)
+# Option 1: openssl (built into macOS/Linux)
 openssl rand -hex 32
 
-# Option 2: Node.js (if Node is installed)
+# Option 2: Node.js (available when Node is installed)
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Copy the output and store it as a secret:
+Copy the random string output by the command and write it as a Secret:
 
 ```bash
-npx wrangler secret put WEBHOOK_SECRET    # paste the random string generated above; it must match the Secret in step 8 "Configure the GitHub Webhook"
+npx wrangler secret put WEBHOOK_SECRET    # paste the random string generated in the previous step; make sure it matches the Secret in step 8 "Configure the GitHub Webhook"
 ```
 
 #### 6.3 Set the admin panel password ADMIN_PASSWORD
 
-`ADMIN_PASSWORD` is the login password for the admin panel. Choose any string that is easy for you to remember but hard to guess (include upper- and lowercase letters and digits, 12+ characters recommended).
+`ADMIN_PASSWORD` is the login password for the admin panel; you can set it to any string that you find easy to remember yet hard to guess (letters in both cases, numbers, and a length of 12 or more are recommended).
 
 ```bash
 npx wrangler secret put ADMIN_PASSWORD    # set your own admin panel password and remember it for login
@@ -206,88 +201,80 @@ npx wrangler secret put ADMIN_PASSWORD    # set your own admin panel password an
 npx wrangler deploy
 ```
 
-(If you have run `npm install` before, you can also use the shorthand `npm run deploy`.)
+(If you have previously run `npm install`, you can also use the shorter `npm run deploy`)
 
-After deployment you get `https://github-backup-worker.<your-subdomain>.workers.dev`. To bind a custom domain, add a Custom Domain for the Worker in the Cloudflare dashboard, change the `routes` in `wrangler.toml` to your domain, and run `deploy` again.
+After deployment you get `https://github-backup-worker.<your-subdomain>.workers.dev`. To bind a custom domain, bind a Custom Domain to the Worker in the Cloudflare console, change the `routes` in `wrangler.toml` to your domain, and `deploy` again.
 
 ### 8. Configure the GitHub Webhook
 
-There are two ways to trigger backups via Webhook:
+You have two ways to configure the Webhook to trigger backups:
 
-**Option A: repository-level (good for a few repositories)**
+**Option A: Repository-level configuration (suitable for a few repositories)**
 
 Target repository → Settings → Webhooks → Add webhook:
 
-- **Payload URL**: `https://<your-worker-url>/webhook`
+- **Payload URL**: `https://<your Worker address>/webhook`
 - **Content type**: `application/json`
-- **Secret**: same as `WEBHOOK_SECRET`
+- **Secret**: the same as `WEBHOOK_SECRET`
 - **Events**: Just the push event
 
-**Option B: organization-level (recommended, good for many repositories)**
+**Option B: Organization-level configuration (recommended, suitable for batch backup of many repositories)**
 
-If you have several repositories to back up, it is strongly recommended to move them under a GitHub Organization and configure an organization-level Webhook:
+If you have multiple repositories to back up, it is strongly recommended to move them under a single GitHub Organization and then configure an organization-level Webhook:
 
 1. Go to your GitHub Organization page → Settings → Webhooks → Add webhook.
 2. Fill in the same Payload URL, Content type, and Secret.
-3. Select Just the push event and save.
+3. Choose Just the push event as the trigger event and save.
 
-After that, all repositories under the organization (including future ones) trigger a backup automatically on push — no need to configure each repository.
+Once configured, every repository under that organization (including ones created later) will automatically trigger a backup on push, without setting them up one by one.
 
 ## Using the Admin Panel
 
-Visit the Worker root path and log in with `ADMIN_PASSWORD`.
+Visit the Worker root path and enter the `ADMIN_PASSWORD` to log in to the admin panel.
 
-**Manual single-repository backup**
+**Manual single-repo backup**
 
-1. Enter `owner/repo`; the branch may be left empty and will be auto-detected
-2. Click "Start Backup" — the repository is validated first, and a wrong spelling or missing branch triggers an immediate dialog
-3. After submitting, the button shows the actual branch used; when the background job finishes a dialog reports the result and the log list refreshes automatically
+1. Fill in `owner/repo`; the branch can be left blank, and when left blank the repository's default branch is detected automatically
+2. After clicking "Start Backup", it first verifies whether the repository exists; a typo or a non-existent branch triggers an immediate popup prompt
+3. Once submitted successfully, the button shows the branch actually used; when the background job finishes, a popup shows the result and the log list below refreshes automatically
 
-**Organization full backup**
+**Full organization backup**
 
-1. Enter the organization name and set "Max backups per run" (default 10, range 1–100)
-2. The system automatically skips repositories whose last backup is newer than `pushed_at`, and only fills in those with updates
-3. When finished, a dialog summarizes the succeeded, failed, and skipped counts
+1. Fill in the organization name and set the "max backups per run" count (default 10, range 1–100)
+2. The system automatically skips repositories whose latest backup time is later than the repository's `pushed_at`, filling in only those with updates
+3. When done, a popup summarizes the success, failure, and skipped counts for this run
 
 **System Settings**
 
-- "Max R2 Storage": the storage limit available for backups (GB), default 8. If several Workers share one R2 bucket, subtract the space used by other projects
-- "Max backups per repo/branch": how many successful backups to keep per (repository, branch), default 5, range 1–100. When you lower it and save, the app counts the old backups to be deleted and shows a confirmation dialog; after you confirm, the excess backups are deleted in the background (both the R2 file and the D1 record are removed), and a dialog reports success or failure
-- "Max failed records to keep": how many failed records to keep per (repository, branch), default 10, range 0–10000. Lowering it also shows a confirmation dialog and then batch-deletes the excess failed records in the background (failed records have no R2 file, so only D1 records are deleted); setting it to 0 and saving clears all historical failure records — equivalent to clearing the failure logs in one click
-- When a space shortage trips the circuit breaker, a red banner appears at the top of the page; free up space by cleaning old backups and click "Resume Backups" to lift it
+- "R2 max available space": sets the upper limit of space (GB) available for backups, default 8. If multiple Workers share the same R2 bucket, deduct the space used by other projects
+- "Max backups kept per repository/branch": sets the number of successful backups kept for each (repository, branch), default 5, range 1–100. When you lower the value and save, it first counts and prompts how many old backups will be deleted; after confirmation the excess backups are deleted in the background in batches (removing both the R2 files and the D1 records), and both completion and mid-way failure trigger a result popup
+- "Max failed records kept": sets the number of failed records kept for each (repository, branch), default 10, range 0–10000. Lowering the value likewise asks for confirmation first and then deletes the excess failed records in the background in batches (failed records have no R2 file, only the D1 record is deleted); setting it to 0 and saving clears all historical failed records, equivalent to a one-click cleanup of the failure log
+-     When the space runs low and the circuit breaker triggers, a red banner appears at the top of the page; after cleaning up old backups to free space, click "Resume Backup" to clear it
 
 **Log list**
 
-- Filter by repository name via the dropdown to avoid confusion
-- Successful records can be "Downloaded" (`.tar.gz`) or "Deleted"; deletion removes both the R2 file and the D1 record. Failed records can also be cleaned up manually
+- Supports dropdown filtering by [repository name and author/organization] to avoid misreading
+- Successful records can be "Downloaded" (`.tar.gz`) or "Deleted"; deletion clears both the R2 file and the D1 record, and failed records also support manual cleanup
 
-**Interface language**
+**Interface Language**
 
-- Both the login page and the admin page have a "中文 / EN" switch in the top-right corner; clicking it switches the whole interface instantly, with no refresh or re-login
-- The choice is saved in the browser's `localStorage` (key `backup_manager_lang`) and reused on the next visit; the first visit defaults to Chinese
-
-## Adding a New Language
-
-- All UI text lives in the `dict` object in `src/i18n.js`; `zh` and `en` correspond to Chinese and English
-- To add a language, add a new language key to `dict` (e.g. `ja`) and translate every entry following the structure of `en`
-- Then add a button to the language switcher on both the login page and the admin page (calling `setLang('ja')`), and register the display name in `getSupportedLangs()`
+- Both the login page and the admin page have a "中文 / EN" toggle button; clicking it switches the entire interface instantly, defaulting to Chinese on first visit
+- The language choice is saved locally in the browser (`localStorage` key `backup_manager_lang`) and is reused automatically the next time you open the page
 
 ## Environment Variables
 
-This project needs only three secrets, all set with `wrangler secret put` (see step 6 above). No Vars need to be configured in `wrangler.toml`.
+This project needs three Secrets, all set via `wrangler secret put` (see step 6 above); no Var needs to be configured in `wrangler.toml`.
 
 | Name | Type | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | Secret | GitHub PAT, used to pull tarballs |
+| `GITHUB_TOKEN` | Secret | GitHub PAT, used to fetch tarballs |
 | `WEBHOOK_SECRET` | Secret | Webhook HMAC verification key |
 | `ADMIN_PASSWORD` | Secret | Admin panel password |
-
-> Note: the retention counts for successful and failed backups are now configured in the admin panel under "System Settings" and stored in the D1 `settings` table (keys `backup_retain_count` and `backup_failed_retain_count`), defaulting to 5 and 10. The `BACKUP_RETAIN_COUNT_DEFAULT` and `BACKUP_FAILED_RETAIN_COUNT_DEFAULT` constants near the top of `src/index.js` are only the fallbacks used when a setting is unset — no code change is needed.
 
 ## Local Development
 
 ```bash
-cp .env.example .dev.vars   # fill in real values
+cp .env.example .dev.vars   # fill in the real values
 npx wrangler dev
 ```
 
@@ -295,14 +282,14 @@ npx wrangler dev
 
 ## Known Limitations
 
-- Only `refs/heads/*` push events are handled; tags and branch deletions are not
-- No scheduled full backup (Webhook trigger only; add a `scheduled` handler yourself if you need a timer)
-- A Worker request has a CPU-time limit, so very large repositories may time out
-- Backups are the tarball snapshots provided by GitHub, not a complete Git repository (no `.git` history)
+- Only handles `refs/heads/*` push events; does not handle tags, branch deletions, etc.
+- No scheduled full backup (triggered only by Webhook; if you need scheduling, implement a `scheduled` handler yourself)
+- A single Worker request has a CPU time limit, so very large repositories may time out
+- Backups are tarball snapshots provided by GitHub, not a complete Git repository (no `.git` history)
 
-## Free-Tier Usage & Security Hardening
+## Free Tier & Security Hardening
 
-For estimates of how each operation consumes the Cloudflare free tier, the thresholds at which each quota is exhausted, and WAF rate-limiting advice to prevent abuse, see [Resource Usage Estimates & Security Hardening](RESOURCE-LIMITS.en.md).
+For an estimation of Cloudflare free-tier consumption per operation after deployment, the thresholds at which each quota is hit, and WAF rate limiting advice to prevent quota abuse, see [Resource Usage & Security Hardening](RESOURCE-LIMITS.en.md).
 
 ## License
 

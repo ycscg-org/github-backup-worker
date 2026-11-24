@@ -1198,6 +1198,8 @@ function adminPageHtml(dict) {
         const setData = await setRes.json();
         const isPaused = setData.settings && setData.settings.backup_paused === 'true';
         document.getElementById('pauseWarning').style.display = isPaused ? 'flex' : 'none';
+        document.getElementById('startBackupBtn').disabled = isPaused;
+        document.getElementById('startFullBackupBtn').disabled = isPaused;
         const res = await fetch('/api/logs');
         if (res.status === 401) { location.reload(); return; }
         const data = await res.json();
@@ -1471,7 +1473,6 @@ function adminPageHtml(dict) {
         const tr = document.createElement('tr');
         const isSuccess = log.status === 'done' || log.status === 'success';
         let statusText = isSuccess ? t('success') : ((log.status === 'error' || log.status === 'failed') ? t('failed') : t('unknownStatus'));
-        const lang = getLang();
         const dateStr = log.created_at ? new Date(log.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US') : '-';
         const cells = [
           dateStr, log.repo_name || '-', log.branch || '-', log.file_name || '-',
@@ -1553,17 +1554,14 @@ async function handleSaveSettings(request, env) {
   if (!isAuthed(request, env)) return Response.json({ success: false, errorCode: "errUnauthorized" }, { status: 401 });
   try {
     const body = await parseJson(request);
-    
+    if (body.backup_paused === 'false' || body.r2_max_gb !== undefined) {
+      await env.DB.prepare("UPDATE settings SET value = 'false' WHERE key = 'backup_paused'").run();
+    }
+
     if (body.r2_max_gb !== undefined) {
       await env.DB.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('r2_max_gb', ?)"
       ).bind(body.r2_max_gb.toString()).run();
-    }
-    
-    if (body.backup_paused !== undefined) {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('backup_paused', ?)"
-      ).bind(body.backup_paused).run();
     }
 
     if (body.backup_retain_count !== undefined) {

@@ -18,6 +18,8 @@ const dict = {
     unknownStatus: '未知',
     download: '下载',
     delete: '删除',
+    retry: '重试',
+    retrying: '重试中...',
     deleting: '删除中...',
     save: '保存设置',
     saving: '保存中...',
@@ -47,6 +49,7 @@ const dict = {
     backupTimeout: '备份超时，已等待3分钟，请稍后刷新日志查看结果',
     backupSuccess: '备份成功！\n仓库：{repo}\n分支：{branch}\n文件大小：{size}',
     backupFailed: '备份失败：',
+    confirmForceBackup: '该仓库代码已有最新备份，无需重复备份。\n\n是否强制再次备份？（会覆盖旧的备份记录并占用新的 R2 空间）',
     inputValidRepo: '请输入正确的仓库格式，例如：ycscg-org/github-backup-worker',
     submitFailed: '提交失败：',
     requestFailed: '请求失败：',
@@ -120,7 +123,7 @@ const dict = {
     deleteFailed: '删除失败：',
     unknownError: '未知错误',
     
-    // 后端错误信息（错误码映射）
+    // 后端错误信息（精简后，只留需要的）
     errUnauthorized: '未授权访问',
     errKvNotBound: 'KV 未绑定',
     errKvNotBoundCleanup: 'KV 未绑定，无法查询清理进度',
@@ -150,18 +153,10 @@ const dict = {
     errDownloadFailed: '下载失败: {msg}',
     errRecordNotFound: '记录不存在',
     errDeleteSuccess: '删除成功',
-    errCleanupOldBackupLog: '[清理旧备份] 删除失败: {file}',
-    errCleanupOldFailedLog: '[清理失败记录] 删除失败，id: {id}',
-    errSpaceFull: '所有仓库均已只剩最新备份，空间依然不足。系统已自动暂停备份，请在管理面板清理并解除暂停。',
-    errWritePauseFailed: '写入熔断状态失败',
-    errLogToDbFailed: 'Failed to log to D1:',
-    errSyncTerminated: '备份已被熔断，任务终止',
-    errSyncAborted: '备份中途因 R2 存储空间不足被熔断',
-    errSyncAbortedMsg: '备份中途因 R2 存储空间不足被熔断。已成功备份 {success} 个，失败 {failed} 个，请清理空间后重试。',
-    errSyncFailedMsg: '，已成功备份 {success} 个，失败 {failed} 个',
-    errFetchReposFailed: '获取组织仓库列表失败: {status} {text}',
-    err404: 'GitHub API Error: 404 Not Found',
     errBackupSuccessMsg: '备份成功',
+    errBackupSpaceFull: '因 R2 空间不足导致备份失败',
+    errRepoNotFoundMsg: '仓库 "{repo}" 不存在，请检查拼写',
+    errOrgNotFoundMsg: '组织 "{org}" 不存在，请检查拼写',
   },
   
   en: {
@@ -179,6 +174,8 @@ const dict = {
     unknownStatus: 'Unknown',
     download: 'Download',
     delete: 'Delete',
+    retry: 'Retry',
+    retrying: 'Retrying...',
     deleting: 'Deleting...',
     save: 'Save Settings',
     saving: 'Saving...',
@@ -208,6 +205,7 @@ const dict = {
     backupTimeout: 'Backup timed out after 3 minutes. Please refresh logs later to check results.',
     backupSuccess: 'Backup successful!\nRepository: {repo}\nBranch: {branch}\nFile size: {size}',
     backupFailed: 'Backup failed: ',
+    confirmForceBackup: 'The latest backup for this repository already exists. Re-backup is not necessary.\n\nDo you want to force a new backup? (This will overwrite the old backup record and consume new R2 space.)',
     inputValidRepo: 'Please enter a valid repository in owner/repo format, e.g.: ycscg-org/github-backup-worker',
     submitFailed: 'Submit failed: ',
     requestFailed: 'Request failed: ',
@@ -281,7 +279,7 @@ const dict = {
     deleteFailed: 'Delete failed: ',
     unknownError: 'Unknown error',
     
-    // Backend error messages (error code mapping)
+    // Backend error messages (cleaned up)
     errUnauthorized: 'Unauthorized access',
     errKvNotBound: 'KV binding not configured',
     errKvNotBoundCleanup: 'KV binding not configured, cannot query cleanup progress',
@@ -311,18 +309,10 @@ const dict = {
     errDownloadFailed: 'Download failed: {msg}',
     errRecordNotFound: 'Record not found',
     errDeleteSuccess: 'Deleted successfully',
-    errCleanupOldBackupLog: '[Old backup cleanup] Failed to delete: {file}',
-    errCleanupOldFailedLog: '[Failed record cleanup] Failed to delete, id: {id}',
-    errSpaceFull: 'All repositories only have the latest backup left, but space is still insufficient. Backups have been automatically paused, please clean up and resume from the admin panel.',
-    errWritePauseFailed: 'Failed to write circuit breaker state',
-    errLogToDbFailed: 'Failed to log to D1:',
-    errSyncTerminated: 'Backups paused by circuit breaker, task terminated',
-    errSyncAborted: 'Backup aborted mid-way due to insufficient R2 storage space',
-    errSyncAbortedMsg: 'Backup aborted mid-way due to insufficient R2 storage space. {success} succeeded, {failed} failed. Please free up space and retry.',
-    errSyncFailedMsg: ', {success} succeeded, {failed} failed',
-    errFetchReposFailed: 'Failed to fetch organization repository list: {status} {text}',
-    err404: 'GitHub API Error: 404 Not Found',
     errBackupSuccessMsg: 'Backup successful',
+    errBackupSpaceFull: 'Backup failed due to insufficient R2 space',
+    errRepoNotFoundMsg: 'Repository "{repo}" not found, please check spelling',
+    errOrgNotFoundMsg: 'Organization "{org}" not found, please check spelling',
   }
 };
 

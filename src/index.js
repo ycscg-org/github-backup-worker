@@ -219,6 +219,7 @@ async function handleTriggerBackup(request, env, ctx) {
     const body = await parseJson(request);
     const repoFullName = (body.repo || "").trim();
     const branch = (body.branch || "").trim();
+    const force = body.force === true; // 👈 新增：接收 force 参数
 
     if (!repoFullName || !repoFullName.includes("/")) {
       return Response.json({ success: false, errorCode: "errRepoFormat" }, { status: 400 });
@@ -239,7 +240,12 @@ async function handleTriggerBackup(request, env, ctx) {
     });
 
     if (repoRes.status === 404) {
-      return Response.json({ success: false, errorCode: 'errRepoNotFound', params: {repo: `${owner}/${repoName}`} }, { status: 404 });
+      return Response.json({ 
+        success: false, 
+        errorCode: 'errRepoNotFoundMsg', 
+        params: { repo: `${owner}/${repoName}` },
+        message: `仓库 "${owner}/${repoName}" 不存在，请检查拼写` // 兜底给前端一个 message
+      }, { status: 404 });
     }
     if (!repoRes.ok) {
       return Response.json({ success: false, message: `GitHub API 错误: ${repoRes.status}` }, { status: 500 });
@@ -247,6 +253,26 @@ async function handleTriggerBackup(request, env, ctx) {
 
     const repoInfo = await repoRes.json();
     const actualBranch = branch || repoInfo.default_branch;
+
+    // 👇 新增：检查现有备份记录，如果有最新且未强制覆盖，返回 needConfirm
+    if (!force) {
+      const existing = await env.DB.prepare(
+        "SELECT created_at FROM backups WHERE repo_name = ? AND status IN ('done','success') ORDER BY created_at DESC LIMIT 1"
+      ).bind(`${owner}/${repoName}`).first();
+
+      if (existing) {
+        const lastBackupTime = new Date(existing.created_at).getTime();
+        const repoPushedAt = new Date(repoInfo.pushed_at).getTime();
+        if (lastBackupTime >= repoPushedAt) {
+          return Response.json({ 
+            success: true, 
+            needConfirm: true, 
+            actualRepo: `${owner}/${repoName}`,
+            actualBranch: actualBranch
+          });
+        }
+      }
+    }
 
     // 先写入pending状态
     if (env.KV) {
@@ -323,7 +349,12 @@ async function handleSyncOrg(request, env, ctx) {
     });
 
     if (checkRes.status === 404) {
-      return Response.json({ success: false, errorCode: 'errOrgNotFound', params: {org: orgName} }, { status: 404 });
+      return Response.json({ 
+        success: false, 
+        errorCode: 'errOrgNotFoundMsg', 
+        params: { org: orgName },
+        message: `组织 "${orgName}" 不存在，请检查拼写`
+      }, { status: 404 });
     }
     if (!checkRes.ok && checkRes.status !== 403) {
        return Response.json({ success: false, message: `GitHub API 错误: ${checkRes.status}` }, { status: 500 });
@@ -779,7 +810,7 @@ async function performBackup(env, owner, repoName, branch, cloneUrl) {
     }
 
     status = "done";
-    errorMsg = "备份成功";
+    errorMsg = "errBackupSuccessMsg"; // 存错误码，前端去翻译
     console.log(`Backup successful: ${fileName}, size: ${fileSize} bytes`);
   } catch (e) {
     status = "error";
@@ -874,7 +905,7 @@ async function checkAndCleanSpace(env, incomingSize = 0) {
     } catch (e) {
       console.error("写入熔断状态失败:", e);
     }
-    throw new Error("所有仓库均已只剩最新备份，空间依然不足。系统已自动暂停备份，请在管理面板清理并解除暂停。");
+    throw new Error("errBackupSpaceFull"); 
   }
 }
 
@@ -894,7 +925,10 @@ async function handleAdminUI(request, env) {
 
 function loginPageHtml(dict) {
   return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>GitHub Backup Admin</title></head>
+<html><head><meta charset="UTF-8"><title data-i18n="headerTitle">GitHub 仓库备份管理</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,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">
+</head>
+
 <body style="font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f0f2f5;">
   <div style="background:#fff;padding:2rem;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);position:relative;">
     <div style="position:absolute;top:1rem;right:1rem;display:flex;gap:4px;" class="lang-switcher">
@@ -930,10 +964,20 @@ function loginPageHtml(dict) {
     function applyLoginLang() {
       const lang = getLang();
       document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      document.title = t('headerTitle');
       // 统一遍历所有带data-i18n的元素
       document.querySelectorAll('[data-i18n]').forEach(el => {
         const key = el.getAttribute('data-i18n');
         if (key === 'zh' || key === 'en') return; // 跳过语言按钮自己，统一处理高亮
+        if (el.tagName === 'TITLE') {
+          document.title = t(key);
+          return;
+        }
+        
+        if (key === 'pageTitle') {
+          el.textContent = t(key) + ' v2.22';
+          return;
+        }
         el.textContent = t(key);
       });
       // 统一遍历所有带data-i18n-placeholder的元素
@@ -976,7 +1020,9 @@ function loginPageHtml(dict) {
 function adminPageHtml(dict) {
   return `<!DOCTYPE html>
 <!-- v2.20 -->
-<html lang="zh-CN"><head><meta charset="UTF-8"><title>备份日志管理</title>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title data-i18n="headerTitle">GitHub 仓库备份管理</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,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">
+
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:20px;background:#f6f8fa;}
   .container{max-width:1200px;margin:0 auto;background:#fff;padding:20px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);}
@@ -990,6 +1036,7 @@ function adminPageHtml(dict) {
   .btn{padding:4px 10px;border:none;border-radius:4px;cursor:pointer;font-size:14px;color:#fff;text-decoration:none;display:inline-block;margin-right:6px;}
   .btn-download{background:#28a745;}
   .btn-delete{background:#d73a49;}
+  .btn-retry{background:#007bff;margin-right:6px;}
   .btn:disabled{opacity:.6;cursor:not-allowed;}
   .col-time{width:130px;}.col-repo{width:120px;}.col-branch{width:90px;}.col-size{width:80px;}.col-status{width:70px;}.col-action{width:120px;}
   .col-file{width: 250px; word-break: break-all;}
@@ -1001,7 +1048,7 @@ function adminPageHtml(dict) {
   <!-- 顶部标题栏 -->
   <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e1e4e8; padding-bottom: 12px; margin-bottom: 20px;">
     <h1 style="margin: 0; font-size: 24px; color: #24292e;" data-i18n="headerTitle">GitHub 仓库备份管理</h1>
-    <span style="background: #e1e4e8; color: #586069; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600;">v2.21</span>
+    <span style="background: #e1e4e8; color: #586069; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: 600;">v2.22</span>
   </div>
 
   <div id="pauseWarning" style="margin-bottom: 20px; padding: 15px; background: #ffebe9; border: 1px solid #ff8182; border-radius: 6px; color: #d73a49; display: none; justify-content: space-between; align-items: center;">
@@ -1120,7 +1167,7 @@ function adminPageHtml(dict) {
         if (key === 'zh' || key === 'en') return;
         // pageTitle 特殊处理，加版本号
         if (key === 'pageTitle') {
-          el.textContent = t(key) + ' v2.20';
+          el.textContent = t(key) + ' v2.22';
           return;
         }
         el.textContent = t(key);
@@ -1356,16 +1403,126 @@ function adminPageHtml(dict) {
           body: JSON.stringify({ repo, branch })
         });
         const result = await res.json();
+        
+        // 👇 如果后端返回提示已有最新备份，让用户决定是否强制覆盖
+        if (result.success && result.needConfirm) {
+          if (confirm(t('confirmForceBackup'))) {
+            // 用户选择继续，发送强制备份请求
+            btn.textContent = t('backingUp') + '...';
+            const forceRes = await fetch('/api/backup/trigger', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ repo: result.actualRepo || repo, branch: result.actualBranch || branch, force: true })
+            });
+            const forceResult = await forceRes.json();
+            if (forceResult.success) {
+              pollManualStatus(btn);
+            } else {
+              alert(t('submitFailed') + forceResult.message);
+              btn.disabled = false; btn.textContent = t('startBackup');
+            }
+          } else {
+            // 用户选择跳过
+            btn.disabled = false; btn.textContent = t('startBackup');
+          }
+          return;
+        }
+
         if (result.success) {
           btn.textContent = t('backingUp') + ' (' + result.branch + ')...';
           pollManualStatus(btn);
         } else {
-          alert(t('submitFailed') + result.message);
+          const errMsg = result.errorCode ? t(result.errorCode, result.params || {}) : (result.message || t('unknownError'));
+          alert(t('submitFailed') + errMsg);
           btn.disabled = false; btn.textContent = t('startBackup');
         }
       } catch (e) {
         alert(t('requestFailed') + e.message);
         btn.disabled = false; btn.textContent = t('startBackup');
+      }
+    }
+
+    async function retryBackup(repo, branch, btn) {
+      btn.disabled = true; btn.textContent = t('retrying');
+      try {
+        const res = await fetch('/api/backup/trigger', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, branch })
+        });
+        const result = await res.json();
+        
+        // 👇 重试时也弹窗询问
+        if (result.success && result.needConfirm) {
+          if (confirm(t('confirmForceBackup'))) {
+            btn.textContent = t('retrying') + '...';
+            const forceRes = await fetch('/api/backup/trigger', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ repo, branch, force: true })
+            });
+            const forceResult = await forceRes.json();
+            if (forceResult.success) {
+              pollRetryStatus(btn);
+            } else {
+              alert(t('submitFailed') + forceResult.message);
+              btn.disabled = false; btn.textContent = t('retry');
+            }
+          } else {
+            btn.disabled = false; btn.textContent = t('retry');
+          }
+          return;
+        }
+
+        if (result.success) {
+          pollRetryStatus(btn);
+        } else {
+          const errMsg = result.errorCode ? t(result.errorCode, result.params || {}) : (result.message || t('unknownError'));
+          alert(t('submitFailed') + errMsg);
+          btn.disabled = false; btn.textContent = t('retry');
+        }
+      } catch (e) {
+        alert(t('requestFailed') + e.message);
+        btn.disabled = false; btn.textContent = t('retry');
+      }
+    }
+
+    async function pollRetryStatus(btn) {
+      let attempts = 0;
+      const poll = async () => {
+        try {
+          attempts++;
+          if (attempts > 60) {
+            alert(t('backupTimeout')); btn.disabled = false; btn.textContent = t('retry'); loadLogs(); return;
+          }
+          const res = await fetch('/api/backup/trigger-status');
+          const data = await res.json();
+          if (data.status === 'pending') setTimeout(poll, 3000);
+          else if (data.status === 'done') {
+            alert(t('backupSuccess', {repo: data.repo, branch: data.branch, size: formatSize(data.fileSize)}));
+            btn.disabled = false; btn.textContent = t('retry'); loadLogs();
+          } else if (data.status === 'error') {
+            alert(t('backupFailed') + data.message);
+            btn.disabled = false; btn.textContent = t('retry'); loadLogs();
+          }
+        } catch (e) { console.error(t('backupTimeout'), e); setTimeout(poll, 3000); }
+      };
+      setTimeout(poll, 2000);
+    }
+
+    async function deleteBackupById(id, btn) {
+      if (!confirm(t('confirmDelete', {name: '#' + id}))) return;
+      btn.disabled = true; btn.textContent = t('deleting');
+      try {
+        const res = await fetch('/api/backup/delete?id=' + id, { method:'DELETE' });
+        const result = await res.json();
+        if (result.success) {
+          alert(t('deleteSuccess'));
+          loadLogs();
+        } else {
+          alert(t('deleteFailed') + (result.message || t('unknownError')));
+          btn.disabled = false; btn.textContent = t('delete');
+        }
+      } catch (e) {
+        alert(t('requestFailed') + e.message);
+        btn.disabled = false; btn.textContent = t('delete');
       }
     }
 
@@ -1414,7 +1571,8 @@ function adminPageHtml(dict) {
         if (result.success) {
           if (!isPolling) { isPolling = true; pollSyncStatus(btn, originalText); }
         } else {
-          alert(t('submitFailed') + result.message);
+          const errMsg = result.errorCode ? t(result.errorCode, result.params || {}) : (result.message || t('unknownError'));
+          alert(t('submitFailed') + errMsg);
           btn.disabled = false; btn.textContent = originalText; loadLogs();
         }
       } catch (e) {
@@ -1473,10 +1631,28 @@ function adminPageHtml(dict) {
         const tr = document.createElement('tr');
         const isSuccess = log.status === 'done' || log.status === 'success';
         let statusText = isSuccess ? t('success') : ((log.status === 'error' || log.status === 'failed') ? t('failed') : t('unknownStatus'));
+        const lang = getLang();
         const dateStr = log.created_at ? new Date(log.created_at).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US') : '-';
+
+        // 👇 对数据库中存的消息进行翻译映射
+        let displayError = log.error_msg || '-';
+        if (log.error_msg === 'errBackupSuccessMsg' || log.error_msg === '备份成功') {
+          displayError = t('errBackupSuccessMsg');
+        } else if (log.error_msg === 'errBackupSpaceFull' || log.error_msg.includes('空间依然不足')) {
+          displayError = t('errBackupSpaceFull');
+        } else if (log.error_msg === 'errBackupPaused' || log.error_msg.includes('已暂停所有备份功能')) {
+          displayError = t('errBackupPaused');
+        } else if (log.error_msg === 'errGithubApi' || log.error_msg.includes('GitHub API Error')) {
+          // 提取状态码（比如 404）进行翻译
+          const match = log.error_msg.match(/(\d+)/);
+          displayError = match ? t('errGithubApi', { status: match[1] }) : log.error_msg;
+        }
+        // 如果数据库中存的就是中文的旧数据（如“GitHub API 错误: 404”），这句会覆盖
+        // 如果前端临时需要展示后端传回来的 message，会保留原始文本
+
         const cells = [
           dateStr, log.repo_name || '-', log.branch || '-', log.file_name || '-',
-          formatSize(log.file_size), statusText, log.error_msg || '-'
+          formatSize(log.file_size), statusText, displayError
         ];
         cells.forEach((v,i) => {
           const td = document.createElement('td');
@@ -1485,16 +1661,27 @@ function adminPageHtml(dict) {
           tr.appendChild(td);
         });
         const tdAction = document.createElement('td');
-        if (log.file_name) {
+        if (log.repo_name) {
           if (isSuccess) {
             const a = document.createElement('a');
             a.href = '/api/backup/download?file=' + encodeURIComponent(log.file_name);
             a.className = 'btn btn-download'; a.textContent = t('download');
             tdAction.appendChild(a);
+          } else {
+            // 失败记录加蓝色重试按钮
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'btn btn-retry'; retryBtn.textContent = t('retry');
+            retryBtn.onclick = () => retryBackup(log.repo_name, log.branch || '', retryBtn);
+            tdAction.appendChild(retryBtn);
           }
+          // 所有记录都有删除按钮，失败记录按id删除
           const b = document.createElement('button');
           b.className = 'btn btn-delete'; b.textContent = t('delete');
-          b.onclick = () => deleteBackup(log.file_name, b);
+          if (log.file_name) {
+            b.onclick = () => deleteBackup(log.file_name, b);
+          } else {
+            b.onclick = () => deleteBackupById(log.id, b);
+          }
           tdAction.appendChild(b);
         } else tdAction.textContent = '-';
         tr.appendChild(tdAction);
@@ -1627,20 +1814,31 @@ async function handleDeleteBackup(request, env) {
   }
   const url = new URL(request.url);
   const fileName = url.searchParams.get("file");
-  if (!fileName) return Response.json({ success: false, errorCode: "errMissingFileParam" }, { status: 400 });
-  if (!isValidBackupFileName(fileName)) return Response.json({ success: false, errorCode: "errInvalidFileName" }, { status: 400 });
+  const idParam = url.searchParams.get("id");
+  if (!fileName && !idParam) return Response.json({ success: false, errorCode: "errMissingFileParam" }, { status: 400 });
   if (!env.DB) return Response.json({ success: false, errorCode: "errDbNotConfigured" }, { status: 500 });
 
-  const row = await env.DB.prepare(
-    "SELECT id, status FROM backups WHERE file_name = ? LIMIT 1"
-  ).bind(fileName).first();
+  let row;
+  if (idParam) {
+    const id = parseInt(idParam, 10);
+    if (!Number.isFinite(id) || id <= 0) return Response.json({ success: false, errorCode: "errInvalidFileName" }, { status: 400 });
+    row = await env.DB.prepare(
+      "SELECT id, file_name, status FROM backups WHERE id = ? LIMIT 1"
+    ).bind(id).first();
+  } else {
+    if (!isValidBackupFileName(fileName)) return Response.json({ success: false, errorCode: "errInvalidFileName" }, { status: 400 });
+    row = await env.DB.prepare(
+      "SELECT id, file_name, status FROM backups WHERE file_name = ? LIMIT 1"
+    ).bind(fileName).first();
+  }
   if (!row) return Response.json({ success: false, errorCode: "errRecordNotFound" }, { status: 404 });
 
   try {
-    if (row.status === 'done' || row.status === 'success') {
-      await env.BUCKET.delete(fileName);
+    const deleteFileName = row.file_name;
+    if (deleteFileName && (row.status === 'done' || row.status === 'success')) {
+      await env.BUCKET.delete(deleteFileName);
     }
-    await env.DB.prepare("DELETE FROM backups WHERE file_name = ?").bind(fileName).run();
+    await env.DB.prepare("DELETE FROM backups WHERE id = ?").bind(row.id).run();
     return Response.json({ success: true, errorCode: "errDeleteSuccess" });
   } catch (e) {
     console.error("Delete backup error:", e);
